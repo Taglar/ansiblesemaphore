@@ -38,6 +38,24 @@
       debug:
         msg: "{{ new_configs.stdout_lines | default(['Keine neuen Konfigurationsdateien gefunden']) }}"
 
+    - name: Diff-Vergleich für neue Konfigurationsdateien durchführen
+      shell: |
+        LOGFILE="/var/log/config_diffs_{{ ansible_date_time.date }}_{{ ansible_date_time.time }}.txt"
+        echo "Vergleich neuer Konfigurationsdateien - {{ ansible_date_time.iso8601 }}" > "$LOGFILE"
+        echo "------------------------------------------------------------" >> "$LOGFILE"
+        {% for file in new_configs.stdout_lines %}
+        ORIG="{{ file | regex_replace('\\.dpkg-new$', '') | regex_replace('\\.dpkg-dist$', '') | regex_replace('\\.ucf-old$', '') }}"
+        if [ -f "$ORIG" ]; then
+          echo "### Diff: $ORIG ↔ {{ file }}" >> "$LOGFILE"
+          diff -u "$ORIG" "{{ file }}" >> "$LOGFILE" || true
+          echo "" >> "$LOGFILE"
+        else
+          echo "### Keine Originaldatei gefunden für {{ file }}" >> "$LOGFILE"
+        fi
+        {% endfor %}
+      when: new_configs.stdout_lines | length > 0
+      changed_when: false
+
     - name: Liste der neuen Konfigurationen sichern
       copy:
         dest: "/var/log/config_changes_{{ ansible_date_time.date }}_{{ ansible_date_time.time }}.txt"
@@ -60,3 +78,15 @@
     - name: Ergebnis - Upgrade
       debug:
         var: upgrade_result.stdout_lines
+
+    - name: Letzten APT-History-Eintrag anzeigen (aktualisierte Pakete)
+      shell: |
+        echo "=== Letzte APT-Operation ==="
+        tac /var/log/apt/history.log | awk '/^Start-Date/{p=1} p; /^End-Date/{exit}' | tac
+      register: apt_history
+      changed_when: false
+      failed_when: false
+
+    - name: APT-History anzeigen
+      debug:
+        msg: "{{ apt_history.stdout_lines | default(['Keine APT-History gefunden']) }}"
