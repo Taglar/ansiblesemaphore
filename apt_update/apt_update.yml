@@ -1,0 +1,4 @@
+- hosts: LinuxUbuntu
+become: true
+roles:
+- apt_safe_upgrade
