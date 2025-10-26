@@ -4,4 +4,9 @@
   tasks:
     - name: ping
       shell: ping -c 1 -w 2 8.8.8.8
+      register: ping_result
       ignore_errors: true
+
+    - name: ping output
+      debug:
+        var: ping_result.stdout
