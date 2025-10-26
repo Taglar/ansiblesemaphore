@@ -94,67 +94,65 @@
       when: new_configs.matched | int > 0
 
     - name: Prüfe und sichere jede gefundene neue Konfigurationsdatei, erstelle Diff und markiere kritische Dateien
-      block:
-        - name: Bestimme Original- und Backup-Pfade
-          vars:
-            orig: "{{ item.path | regex_replace('\\.dpkg-new$','') | regex_replace('\\.dpkg-dist$','') | regex_replace('\\.ucf-old$','') }}"
-            name_sanitized: "{{ item.path | regex_replace('^/','') | regex_replace('/','_') }}"
-            orig_sanitized: "{{ orig | regex_replace('^/','') | regex_replace('/','_') }}"
-          block:
-            - name: Backup: neue Datei kopieren
-              copy:
-                src: "{{ item.path }}"
-                dest: "{{ backup_dir }}/new__{{ name_sanitized }}"
-                owner: root
-                group: root
-                mode: '0644'
-
-            - name: Backup: Originaldatei kopieren (falls vorhanden)
-              stat:
-                path: "{{ orig }}"
-              register: orig_stat
-
-            - name: Kopiere Original ins Backup (falls vorhanden)
-              when: orig_stat.stat.exists | default(false)
-              copy:
-                src: "{{ orig }}"
-                dest: "{{ backup_dir }}/orig__{{ orig_sanitized }}"
-                owner: root
-                group: root
-                mode: '0644'
-
-            - name: Diff in Log schreiben (falls Original existiert)
-              when: orig_stat.stat.exists | default(false)
-              shell: |
-                echo "### Diff: {{ orig }} ↔ {{ item.path }}" >> "{{ log_diff }}"
-                diff -u "{{ orig }}" "{{ item.path }}" >> "{{ log_diff }}" || true
-                echo "" >> "{{ log_diff }}"
-              args:
-                warn: false
-              changed_when: false
-
-            - name: Notiere Datei in Liste
-              lineinfile:
-                path: "{{ log_list }}"
-                line: "{{ item.path }}"
-                create: yes
-              changed_when: false
-
-            - name: Falls Original fehlt, notiere das im Diff-Log
-              when: not (orig_stat.stat.exists | default(false))
-              lineinfile:
-                path: "{{ log_diff }}"
-                line: "### Keine Originaldatei gefunden für {{ item.path }}"
-                create: yes
-              changed_when: false
-
-            - name: Falls Datei unter kritischem Pfad liegt, zu critical_files hinzufügen
-              when: critical_paths | select('search', item.path) | list | length > 0
-              set_fact:
-                critical_files: "{{ critical_files + [ item.path ] }}"
       loop: "{{ new_configs.files | default([]) }}"
       when: new_configs.matched | int > 0
       changed_when: false
+      vars:
+        orig: "{{ item.path | regex_replace('\\.dpkg-new$','') | regex_replace('\\.dpkg-dist$','') | regex_replace('\\.ucf-old$','') }}"
+        name_sanitized: "{{ item.path | regex_replace('^/','') | regex_replace('/','_') }}"
+        orig_sanitized: "{{ orig | regex_replace('^/','') | regex_replace('/','_') }}"
+      block:
+        - name: Backup: neue Datei kopieren
+          copy:
+            src: "{{ item.path }}"
+            dest: "{{ backup_dir }}/new__{{ name_sanitized }}"
+            owner: root
+            group: root
+            mode: '0644'
+
+        - name: Backup: Originaldatei kopieren (falls vorhanden)
+          stat:
+            path: "{{ orig }}"
+          register: orig_stat
+
+        - name: Kopiere Original ins Backup (falls vorhanden)
+          when: orig_stat.stat.exists | default(false)
+          copy:
+            src: "{{ orig }}"
+            dest: "{{ backup_dir }}/orig__{{ orig_sanitized }}"
+            owner: root
+            group: root
+            mode: '0644'
+
+        - name: Diff in Log schreiben (falls Original existiert)
+          when: orig_stat.stat.exists | default(false)
+          shell: |
+            echo "### Diff: {{ orig }} ↔ {{ item.path }}" >> "{{ log_diff }}"
+            diff -u "{{ orig }}" "{{ item.path }}" >> "{{ log_diff }}" || true
+            echo "" >> "{{ log_diff }}"
+          args:
+            warn: false
+          changed_when: false
+
+        - name: Notiere Datei in Liste
+          lineinfile:
+            path: "{{ log_list }}"
+            line: "{{ item.path }}"
+            create: yes
+          changed_when: false
+
+        - name: Falls Original fehlt, notiere das im Diff-Log
+          when: not (orig_stat.stat.exists | default(false))
+          lineinfile:
+            path: "{{ log_diff }}"
+            line: "### Keine Originaldatei gefunden für {{ item.path }}"
+            create: yes
+          changed_when: false
+
+        - name: Falls Datei unter kritischem Pfad liegt, zu critical_files hinzufügen
+          when: critical_paths | select('search', item.path) | list | length > 0
+          set_fact:
+            critical_files: "{{ critical_files + [ item.path ] }}"
 
     - name: Ausgabe: gefundene kritische Konfigurationsdateien (falls vorhanden)
       debug:
