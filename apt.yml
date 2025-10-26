@@ -4,85 +4,194 @@
   become_method: sudo
   become_user: root
 
+  vars:
+    timestamp_safe: "{{ (ansible_date_time.date ~ '_' ~ ansible_date_time.time) | regex_replace(':','') }}"
+    log_diff: "/var/log/config_diffs_{{ timestamp_safe }}.txt"
+    log_list: "/var/log/config_changes_{{ timestamp_safe }}.txt"
+    backup_dir: "/var/backups/apt_config_{{ timestamp_safe }}"
+    critical_paths:
+      - "/etc/ssh"
+      - "/etc/network"
+      - "/etc/netplan"
+      - "/etc/hosts"
+      - "/etc/hostname"
+
   tasks:
-    - name: Sicherstellen, dass keine APT-Locks aktiv sind
-      shell: |
-        echo "Warte auf freie APT-Locks..."
-        while fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 1; done
-        while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 1; done
-        while fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do sleep 1; done
-        echo "APT-Locks freigegeben."
+    - name: Initialisiere Variablen
+      set_fact:
+        critical_files: []
+
+    - name: Warte auf freie APT-/DPKG-Locks
+      wait_for:
+        path: "{{ item }}"
+        state: absent
+        timeout: 300
+      loop:
+        - /var/lib/dpkg/lock
+        - /var/lib/dpkg/lock-frontend
+        - /var/lib/apt/lists/lock
       changed_when: false
 
-    - name: Paketlisten aktualisieren
-      shell: |
-        DEBIAN_FRONTEND=noninteractive apt-get update -y
+    - name: Apt-Cache aktualisieren
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
       register: update_result
 
-    - name: Upgrade mit Sicherung neuer Konfigurationsdateien
-      shell: |
-        DEBIAN_FRONTEND=noninteractive \
-        apt-get -o Dpkg::Options::="--force-confdef" \
-                -o Dpkg::Options::="--force-confnew" \
-                upgrade -y
+    - name: System-Upgrade (vorhandene Konfigurationsdateien behalten)
+      apt:
+        upgrade: yes
+        force_apt_get: yes
+        dpkg_options:
+          - "--force-confdef"
+          - "--force-confold"
       register: upgrade_result
 
-    - name: Nach neuen oder geänderten Konfigurationsdateien suchen
-      shell: |
-        find /etc -type f \( -name "*.dpkg-new" -o -name "*.dpkg-dist" -o -name "*.ucf-old" \) 2>/dev/null
+    - name: Nach neuen/alten Konfigurationsdateien suchen
+      find:
+        paths: "{{ critical_paths + ['/etc'] | unique }}"
+        file_type: file
+        patterns:
+          - "*.dpkg-new"
+          - "*.dpkg-dist"
+          - "*.ucf-old"
       register: new_configs
       changed_when: false
       failed_when: false
 
-    - name: Liste der neuen Konfigurationen anzeigen
-      debug:
-        msg: "{{ new_configs.stdout_lines | default(['Keine neuen Konfigurationsdateien gefunden']) }}"
-
-    - name: Diff-Vergleich für neue Konfigurationsdateien durchführen
-      shell: |
-        LOGFILE="/var/log/config_diffs_{{ ansible_date_time.date }}_{{ ansible_date_time.time }}.txt"
-        echo "Vergleich neuer Konfigurationsdateien - {{ ansible_date_time.iso8601 }}" > "$LOGFILE"
-        echo "------------------------------------------------------------" >> "$LOGFILE"
-        {% for file in new_configs.stdout_lines %}
-        ORIG="{{ file | regex_replace('\\.dpkg-new$', '') | regex_replace('\\.dpkg-dist$', '') | regex_replace('\\.ucf-old$', '') }}"
-        if [ -f "$ORIG" ]; then
-          echo "### Diff: $ORIG ↔ {{ file }}" >> "$LOGFILE"
-          diff -u "$ORIG" "{{ file }}" >> "$LOGFILE" || true
-          echo "" >> "$LOGFILE"
-        else
-          echo "### Keine Originaldatei gefunden für {{ file }}" >> "$LOGFILE"
-        fi
-        {% endfor %}
-      when: new_configs.stdout_lines | length > 0
+    - name: Verzeichnisse für Backups/Logs anlegen
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      loop:
+        - "{{ backup_dir }}"
+        - "{{ log_diff | dirname }}"
       changed_when: false
 
-    - name: Liste der neuen Konfigurationen sichern
+    - name: Header für Diff-Log anlegen (wenn Dateien gefunden)
       copy:
-        dest: "/var/log/config_changes_{{ ansible_date_time.date }}_{{ ansible_date_time.time }}.txt"
+        dest: "{{ log_diff }}"
+        content: |
+          Vergleich neuer Konfigurationsdateien - {{ ansible_date_time.iso8601 }}
+          ------------------------------------------------------------
+      owner: root
+      group: root
+      mode: '0644'
+      when: new_configs.matched | int > 0
+
+    - name: Header für Liste der neuen Konfigurationsdateien anlegen
+      copy:
+        dest: "{{ log_list }}"
         content: |
           Upgrade-Datum: {{ ansible_date_time.iso8601 }}
           ------------------------------------------------------------
-          {% if new_configs.stdout_lines %}
-          {% for line in new_configs.stdout_lines %}
-          {{ line }}
-          {% endfor %}
-          {% else %}
-          Keine neuen oder geänderten Konfigurationsdateien gefunden.
-          {% endif %}
-      when: new_configs.stdout_lines | length > 0
+      owner: root
+      group: root
+      mode: '0644'
+      when: new_configs.matched | int > 0
 
-    - name: Ergebnis - Paketlisten aktualisieren
-      debug:
-        var: update_result.stdout_lines
+    - name: Prüfe und sichere jede gefundene neue Konfigurationsdatei, erstelle Diff und markiere kritische Dateien
+      block:
+        - name: Bestimme Original- und Backup-Pfade
+          vars:
+            orig: "{{ item.path | regex_replace('\\.dpkg-new$','') | regex_replace('\\.dpkg-dist$','') | regex_replace('\\.ucf-old$','') }}"
+            name_sanitized: "{{ item.path | regex_replace('^/','') | regex_replace('/','_') }}"
+            orig_sanitized: "{{ orig | regex_replace('^/','') | regex_replace('/','_') }}"
+          block:
+            - name: Backup: neue Datei kopieren
+              copy:
+                src: "{{ item.path }}"
+                dest: "{{ backup_dir }}/new__{{ name_sanitized }}"
+                owner: root
+                group: root
+                mode: '0644'
 
-    - name: Ergebnis - Upgrade
+            - name: Backup: Originaldatei kopieren (falls vorhanden)
+              stat:
+                path: "{{ orig }}"
+              register: orig_stat
+
+            - name: Kopiere Original ins Backup (falls vorhanden)
+              when: orig_stat.stat.exists | default(false)
+              copy:
+                src: "{{ orig }}"
+                dest: "{{ backup_dir }}/orig__{{ orig_sanitized }}"
+                owner: root
+                group: root
+                mode: '0644'
+
+            - name: Diff in Log schreiben (falls Original existiert)
+              when: orig_stat.stat.exists | default(false)
+              shell: |
+                echo "### Diff: {{ orig }} ↔ {{ item.path }}" >> "{{ log_diff }}"
+                diff -u "{{ orig }}" "{{ item.path }}" >> "{{ log_diff }}" || true
+                echo "" >> "{{ log_diff }}"
+              args:
+                warn: false
+              changed_when: false
+
+            - name: Notiere Datei in Liste
+              lineinfile:
+                path: "{{ log_list }}"
+                line: "{{ item.path }}"
+                create: yes
+              changed_when: false
+
+            - name: Falls Original fehlt, notiere das im Diff-Log
+              when: not (orig_stat.stat.exists | default(false))
+              lineinfile:
+                path: "{{ log_diff }}"
+                line: "### Keine Originaldatei gefunden für {{ item.path }}"
+                create: yes
+              changed_when: false
+
+            - name: Falls Datei unter kritischem Pfad liegt, zu critical_files hinzufügen
+              when: critical_paths | select('search', item.path) | list | length > 0
+              set_fact:
+                critical_files: "{{ critical_files + [ item.path ] }}"
+      loop: "{{ new_configs.files | default([]) }}"
+      when: new_configs.matched | int > 0
+      changed_when: false
+
+    - name: Ausgabe: gefundene kritische Konfigurationsdateien (falls vorhanden)
       debug:
-        var: upgrade_result.stdout_lines
+        msg:
+          - "Kritische Konfigurationsdateien gefunden: {{ critical_files | default([]) }}"
+          - "Backups und Diffs liegen in: {{ backup_dir }}, {{ log_diff }}, {{ log_list }}"
+      when: critical_files | length > 0
+
+    - name: Alte Backups älter als 14 Tage löschen
+      find:
+        paths: /var/backups
+        age: 14d
+        patterns: "apt_config_*"
+      register: old_backups
+
+    - name: Entferne alte Backups
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ old_backups.files }}"
+      when: old_backups.matched | int > 0
+
+    - name: Update-Result anzeigen
+      debug:
+        var: update_result
+
+    - name: Upgrade-Result anzeigen
+      debug:
+        var: upgrade_result
 
     - name: Letzten APT-History-Eintrag anzeigen (aktualisierte Pakete)
       shell: |
-        echo "=== Letzte APT-Operation ==="
-        tac /var/log/apt/history.log | awk '/^Start-Date/{p=1} p; /^End-Date/{exit}' | tac
+        if [ -f /var/log/apt/history.log ]; then
+          tac /var/log/apt/history.log | awk '/^Start-Date/{p=1} p; /^End-Date/{exit}' | tac
+        else
+          echo "Keine APT-History gefunden"
+        fi
       register: apt_history
       changed_when: false
       failed_when: false
