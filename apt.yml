@@ -72,26 +72,26 @@
       changed_when: false
 
     - name: Header für Diff-Log anlegen (wenn Dateien gefunden)
+      when: new_configs.matched | int > 0
       copy:
         dest: "{{ log_diff }}"
         content: |
           Vergleich neuer Konfigurationsdateien - {{ ansible_date_time.iso8601 }}
           ------------------------------------------------------------
-      owner: root
-      group: root
-      mode: '0644'
-      when: new_configs.matched | int > 0
+        owner: root
+        group: root
+        mode: '0644'
 
     - name: Header für Liste der neuen Konfigurationsdateien anlegen
+      when: new_configs.matched | int > 0
       copy:
         dest: "{{ log_list }}"
         content: |
           Upgrade-Datum: {{ ansible_date_time.iso8601 }}
           ------------------------------------------------------------
-      owner: root
-      group: root
-      mode: '0644'
-      when: new_configs.matched | int > 0
+        owner: root
+        group: root
+        mode: '0644'
 
     - name: Neue Konfigurationsdateien sichern und Diff erstellen
       vars:
