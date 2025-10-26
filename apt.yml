@@ -17,28 +17,50 @@
       - "/etc/hostname"
 
   tasks:
+
     - name: Initialisiere Variablen
       set_fact:
         critical_files: []
 
-    - name: Warte auf freie APT-/DPKG-Locks
-      wait_for:
-        path: "{{ item }}"
-        state: absent
-        timeout: 300
-      loop:
-        - /var/lib/dpkg/lock
-        - /var/lib/dpkg/lock-frontend
-        - /var/lib/apt/lists/lock
+    - name: Prüfe und warte auf freie APT-/DPKG-Locks
+      shell: |
+        LOCKS=("/var/lib/dpkg/lock" "/var/lib/dpkg/lock-frontend" "/var/lib/apt/lists/lock")
+        for LOCK in "${LOCKS[@]}"; do
+          if [ -e "$LOCK" ]; then
+            echo "Lock $LOCK gefunden, prüfe Prozess..."
+            PROC=$(lsof "$LOCK" 2>/dev/null | awk 'NR==2{print $1}')
+            if [ -n "$PROC" ]; then
+              echo "APT-Lock aktiv durch Prozess: $PROC – warte..."
+              ATTEMPTS=0
+              while [ $ATTEMPTS -lt 30 ]; do
+                sleep 10
+                if [ ! -e "$LOCK" ]; then
+                  echo "$LOCK wurde freigegeben"
+                  break
+                fi
+                ATTEMPTS=$((ATTEMPTS+1))
+              done
+              if [ $ATTEMPTS -eq 30 ]; then
+                echo "Timeout: Lock $LOCK nach 5 Minuten immer noch aktiv."
+                exit 1
+              fi
+            else
+              echo "Kein Prozess für $LOCK gefunden – entferne verwaiste Lock-Datei."
+              rm -f "$LOCK"
+            fi
+          fi
+        done
+      register: lock_check
       changed_when: false
+      failed_when: lock_check.rc != 0
 
-    - name: Apt-Cache aktualisieren
+    - name: Paketquellen aktualisieren
       apt:
         update_cache: yes
         cache_valid_time: 3600
       register: update_result
 
-    - name: System-Upgrade (vorhandene Konfigurationsdateien behalten)
+    - name: Upgrade ausführen (bestehende Konfigurationen behalten)
       apt:
         upgrade: yes
         force_apt_get: yes
@@ -76,7 +98,7 @@
       copy:
         dest: "{{ log_diff }}"
         content: |
-          Vergleich neuer Konfigurationsdateien - {{ ansible_date_time.iso8601 }}
+          Vergleich neuer Konfigurationsdateien – {{ ansible_date_time.iso8601 }}
           ------------------------------------------------------------
         owner: root
         group: root
@@ -93,7 +115,7 @@
         group: root
         mode: '0644'
 
-    - name: Neue Datei sichern
+    - name: Neue Dateien sichern
       copy:
         src: "{{ item.path }}"
         dest: "{{ backup_dir }}/new__{{ item.path | regex_replace('^/','') | regex_replace('/','_') }}"
@@ -103,14 +125,14 @@
       loop: "{{ new_configs.files | default([]) }}"
       when: new_configs.matched | int > 0
 
-    - name: Prüfe, ob Originaldatei existiert
+    - name: Prüfe, ob Originaldateien existieren
       stat:
         path: "{{ item.path | regex_replace('\\.dpkg-new$','') | regex_replace('\\.dpkg-dist$','') | regex_replace('\\.ucf-old$','') }}"
       loop: "{{ new_configs.files | default([]) }}"
       register: orig_stat_list
       when: new_configs.matched | int > 0
 
-    - name: Kopiere Originaldateien ins Backup (falls vorhanden)
+    - name: Originaldateien sichern (falls vorhanden)
       copy:
         src: "{{ item.item.path | regex_replace('\\.dpkg-new$','') | regex_replace('\\.dpkg-dist$','') | regex_replace('\\.ucf-old$','') }}"
         dest: "{{ backup_dir }}/orig__{{ item.item.path | regex_replace('^/','') | regex_replace('/','_') }}"
@@ -120,7 +142,7 @@
       loop: "{{ orig_stat_list.results | selectattr('stat.exists', 'defined') | selectattr('stat.exists') | list }}"
       when: new_configs.matched | int > 0
 
-    - name: Diff erstellen (falls Original vorhanden)
+    - name: Diff-Logs erstellen
       shell: |
         orig="{{ item.path | regex_replace('\\.dpkg-new$','') | regex_replace('\\.dpkg-dist$','') | regex_replace('\\.ucf-old$','') }}"
         if [ -f "$orig" ]; then
@@ -136,7 +158,7 @@
       changed_when: false
       when: new_configs.matched | int > 0
 
-    - name: Datei in Log-Liste aufnehmen
+    - name: Neue Dateien in Logliste eintragen
       lineinfile:
         path: "{{ log_list }}"
         line: "{{ item.path }}"
@@ -173,11 +195,11 @@
       loop: "{{ old_backups.files }}"
       when: old_backups.matched | int > 0
 
-    - name: Update-Result anzeigen
+    - name: APT-Update-Ergebnis anzeigen
       debug:
         var: update_result
 
-    - name: Upgrade-Result anzeigen
+    - name: APT-Upgrade-Ergebnis anzeigen
       debug:
         var: upgrade_result
 
@@ -192,6 +214,6 @@
       changed_when: false
       failed_when: false
 
-    - name: APT-History anzeigen
+    - name: APT-History ausgeben
       debug:
         msg: "{{ apt_history.stdout_lines | default(['Keine APT-History gefunden']) }}"
