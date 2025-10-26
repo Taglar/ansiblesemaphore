@@ -93,69 +93,66 @@
         group: root
         mode: '0644'
 
-    - name: Neue Konfigurationsdateien sichern und Diff erstellen
-      vars:
-        orig: "{{ item.path | regex_replace('\\.dpkg-new$','') | regex_replace('\\.dpkg-dist$','') | regex_replace('\\.ucf-old$','') }}"
-        name_sanitized: "{{ item.path | regex_replace('^/','') | regex_replace('/','_') }}"
-        orig_sanitized: "{{ orig | regex_replace('^/','') | regex_replace('/','_') }}"
+    - name: Neue Datei sichern
+      copy:
+        src: "{{ item.path }}"
+        dest: "{{ backup_dir }}/new__{{ item.path | regex_replace('^/','') | regex_replace('/','_') }}"
+        owner: root
+        group: root
+        mode: '0644'
       loop: "{{ new_configs.files | default([]) }}"
-      loop_control:
-        label: "{{ item.path }}"
       when: new_configs.matched | int > 0
-      block:
-        - name: Neue Datei sichern
-          copy:
-            src: "{{ item.path }}"
-            dest: "{{ backup_dir }}/new__{{ name_sanitized }}"
-            owner: root
-            group: root
-            mode: '0644'
 
-        - name: Prüfe, ob Original existiert
-          stat:
-            path: "{{ orig }}"
-          register: orig_stat
+    - name: Prüfe, ob Originaldatei existiert
+      stat:
+        path: "{{ item.path | regex_replace('\\.dpkg-new$','') | regex_replace('\\.dpkg-dist$','') | regex_replace('\\.ucf-old$','') }}"
+      loop: "{{ new_configs.files | default([]) }}"
+      register: orig_stat_list
+      when: new_configs.matched | int > 0
 
-        - name: Original sichern (falls vorhanden)
-          when: orig_stat.stat.exists | default(false)
-          copy:
-            src: "{{ orig }}"
-            dest: "{{ backup_dir }}/orig__{{ orig_sanitized }}"
-            owner: root
-            group: root
-            mode: '0644'
+    - name: Kopiere Originaldateien ins Backup (falls vorhanden)
+      copy:
+        src: "{{ item.item.path | regex_replace('\\.dpkg-new$','') | regex_replace('\\.dpkg-dist$','') | regex_replace('\\.ucf-old$','') }}"
+        dest: "{{ backup_dir }}/orig__{{ item.item.path | regex_replace('^/','') | regex_replace('/','_') }}"
+        owner: root
+        group: root
+        mode: '0644'
+      loop: "{{ orig_stat_list.results | selectattr('stat.exists', 'defined') | selectattr('stat.exists') | list }}"
+      when: new_configs.matched | int > 0
 
-        - name: Diff erstellen (falls Original existiert)
-          when: orig_stat.stat.exists | default(false)
-          shell: |
-            echo "### Diff: {{ orig }} ↔ {{ item.path }}" >> "{{ log_diff }}"
-            diff -u "{{ orig }}" "{{ item.path }}" >> "{{ log_diff }}" || true
-            echo "" >> "{{ log_diff }}"
-          args:
-            warn: false
-          changed_when: false
+    - name: Diff erstellen (falls Original vorhanden)
+      shell: |
+        orig="{{ item.path | regex_replace('\\.dpkg-new$','') | regex_replace('\\.dpkg-dist$','') | regex_replace('\\.ucf-old$','') }}"
+        if [ -f "$orig" ]; then
+          echo "### Diff: $orig ↔ {{ item.path }}" >> "{{ log_diff }}"
+          diff -u "$orig" "{{ item.path }}" >> "{{ log_diff }}" || true
+          echo "" >> "{{ log_diff }}"
+        else
+          echo "### Keine Originaldatei gefunden für {{ item.path }}" >> "{{ log_diff }}"
+        fi
+      loop: "{{ new_configs.files | default([]) }}"
+      args:
+        warn: false
+      changed_when: false
+      when: new_configs.matched | int > 0
 
-        - name: Falls kein Original existiert, im Diff-Log vermerken
-          when: not (orig_stat.stat.exists | default(false))
-          lineinfile:
-            path: "{{ log_diff }}"
-            line: "### Keine Originaldatei gefunden für {{ item.path }}"
-            create: yes
-          changed_when: false
+    - name: Datei in Log-Liste aufnehmen
+      lineinfile:
+        path: "{{ log_list }}"
+        line: "{{ item.path }}"
+        create: yes
+      loop: "{{ new_configs.files | default([]) }}"
+      changed_when: false
+      when: new_configs.matched | int > 0
 
-        - name: Datei in Log-Liste aufnehmen
-          lineinfile:
-            path: "{{ log_list }}"
-            line: "{{ item.path }}"
-            create: yes
-          changed_when: false
+    - name: Kritische Dateien erkennen
+      set_fact:
+        critical_files: "{{ critical_files + [ item.path ] }}"
+      when: critical_paths | select('search', item.path) | list | length > 0
+      loop: "{{ new_configs.files | default([]) }}"
+      changed_when: false
 
-        - name: Wenn Datei unter kritischem Pfad liegt, merken
-          when: critical_paths | select('search', item.path) | list | length > 0
-          set_fact:
-            critical_files: "{{ critical_files + [ item.path ] }}"
-
-    - name: Kritische Dateien anzeigen (falls vorhanden)
+    - name: Kritische Dateien anzeigen
       debug:
         msg:
           - "Kritische Konfigurationsdateien gefunden: {{ critical_files | default([]) }}"
@@ -184,7 +181,7 @@
       debug:
         var: upgrade_result
 
-    - name: Letzten APT-History-Eintrag anzeigen (aktualisierte Pakete)
+    - name: Letzten APT-History-Eintrag anzeigen
       shell: |
         if [ -f /var/log/apt/history.log ]; then
           tac /var/log/apt/history.log | awk '/^Start-Date/{p=1} p; /^End-Date/{exit}' | tac
