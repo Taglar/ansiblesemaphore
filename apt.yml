@@ -1,33 +1,42 @@
 ---
 - hosts: LinuxUbuntu
   become: true
-  become_method: sudo
-  become_user: root
-
   tasks:
-    - name: Zeige aktuellen Benutzer (ohne sudo)
-      command: whoami
-      register: whoami_normal
+    - name: Paketlisten aktualisieren
+      apt:
+        update_cache: yes
+      register: update_result
 
-    - name: Ausgabe ohne sudo
+    - name: Upgrade mit Sicherung neuer Konfigurationsdateien
+      shell: |
+        DEBIAN_FRONTEND=noninteractive \
+        apt-get -o Dpkg::Options::="--force-confdef" \
+                -o Dpkg::Options::="--force-confnew" \
+                upgrade -y
+      register: upgrade_result
+
+    - name: Nach neuen oder geänderten Konfigurationsdateien suchen
+      shell: |
+        find /etc -type f \( -name "*.dpkg-new" -o -name "*.dpkg-dist" -o -name "*.ucf-old" \) 2>/dev/null
+      register: new_configs
+      changed_when: false
+      failed_when: false
+
+    - name: Liste der neuen Konfigurationen anzeigen
       debug:
-        msg: "Vor sudo: {{ whoami_normal.stdout }}"
+        msg: "{{ new_configs.stdout_lines | default(['Keine neuen Konfigurationsdateien gefunden']) }}"
 
-    - name: Zeige aktuellen Benutzer (mit sudo)
-      become: true
-      command: whoami
-      register: whoami_sudo
-
-    - name: Ausgabe mit sudo
-      debug:
-        msg: "Nach sudo: {{ whoami_sudo.stdout }}"
-
-    - name: Test ob apt funktioniert (ohne Änderung)
-      become: true
-      shell: apt-get -v | head -n 1
-      register: apt_test
-      ignore_errors: true
-
-    - name: Ergebnis des apt Tests
-      debug:
-        msg: "APT-Test: {{ apt_test.stdout | default('Fehler beim Zugriff auf apt') }}"
+    - name: Liste der neuen Konfigurationen sichern
+      copy:
+        dest: "/var/log/config_changes_{{ ansible_date_time.date }}_{{ ansible_date_time.time }}.txt"
+        content: |
+          Upgrade-Datum: {{ ansible_date_time.iso8601 }}
+          ------------------------------------------------------------
+          {% if new_configs.stdout_lines %}
+          {% for line in new_configs.stdout_lines %}
+          {{ line }}
+          {% endfor %}
+          {% else %}
+          Keine neuen oder geänderten Konfigurationsdateien gefunden.
+          {% endif %}
+      when: new_configs.stdout_lines | length > 0
