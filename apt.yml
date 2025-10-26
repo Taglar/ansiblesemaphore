@@ -21,7 +21,7 @@
       set_fact:
         critical_files: []
 
-    # Robuste Lock-Prüfung (POSIX /bin/sh-kompatibel, ohne Bash-Arrays)
+    # Robuste Lock-Prüfung
     - name: Prüfe und warte auf freie APT-/DPKG-Locks
       shell: |
         for LOCK in /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock; do
@@ -125,6 +125,7 @@
         owner: root
         group: root
         mode: '0644'
+        remote_src: true
       loop: "{{ new_configs.files | default([]) }}"
       when: new_configs.matched | int > 0
 
@@ -142,6 +143,7 @@
         owner: root
         group: root
         mode: '0644'
+        remote_src: true
       loop: "{{ orig_stat_list.results | selectattr('stat.exists', 'defined') | selectattr('stat.exists') | list }}"
       when: new_configs.matched | int > 0
 
@@ -155,9 +157,9 @@
         else
           echo "### Keine Originaldatei gefunden für {{ item.path }}" >> "{{ log_diff }}"
         fi
-      loop: "{{ new_configs.files | default([]) }}"
       args:
         warn: false
+      loop: "{{ new_configs.files | default([]) }}"
       changed_when: false
       when: new_configs.matched | int > 0
 
