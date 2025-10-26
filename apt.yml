@@ -17,30 +17,27 @@
       - "/etc/hostname"
 
   tasks:
-
     - name: Initialisiere Variablen
       set_fact:
         critical_files: []
 
+    # Robuste Lock-Prüfung (POSIX /bin/sh-kompatibel, ohne Bash-Arrays)
     - name: Prüfe und warte auf freie APT-/DPKG-Locks
       shell: |
-        LOCKS=("/var/lib/dpkg/lock" "/var/lib/dpkg/lock-frontend" "/var/lib/apt/lists/lock")
-        for LOCK in "${LOCKS[@]}"; do
+        for LOCK in /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock; do
           if [ -e "$LOCK" ]; then
-            echo "Lock $LOCK gefunden, prüfe Prozess..."
-            PROC=$(lsof "$LOCK" 2>/dev/null | awk 'NR==2{print $1}')
-            if [ -n "$PROC" ]; then
-              echo "APT-Lock aktiv durch Prozess: $PROC – warte..."
+            if fuser "$LOCK" >/dev/null 2>&1; then
+              echo "APT-Lock aktiv auf $LOCK – warte..."
               ATTEMPTS=0
-              while [ $ATTEMPTS -lt 30 ]; do
+              while [ "$ATTEMPTS" -lt 30 ]; do
                 sleep 10
-                if [ ! -e "$LOCK" ]; then
+                if ! fuser "$LOCK" >/dev/null 2>&1; then
                   echo "$LOCK wurde freigegeben"
                   break
                 fi
                 ATTEMPTS=$((ATTEMPTS+1))
               done
-              if [ $ATTEMPTS -eq 30 ]; then
+              if [ "$ATTEMPTS" -eq 30 ]; then
                 echo "Timeout: Lock $LOCK nach 5 Minuten immer noch aktiv."
                 exit 1
               fi
@@ -53,6 +50,12 @@
       register: lock_check
       changed_when: false
       failed_when: lock_check.rc != 0
+
+    - name: Stelle sicher, dass psmisc (fuser) vorhanden ist
+      apt:
+        name: psmisc
+        state: present
+        update_cache: false
 
     - name: Paketquellen aktualisieren
       apt:
