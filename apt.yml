@@ -1,10 +1,22 @@
 ---
 - hosts: LinuxUbuntu
   become: true
+  become_method: sudo
+  become_user: root
+
   tasks:
+    - name: Sicherstellen, dass keine APT-Locks aktiv sind
+      shell: |
+        echo "Warte auf freie APT-Locks..."
+        while fuser /var/lib/dpkg/lock >/dev/null 2>&1; do sleep 1; done
+        while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 1; done
+        while fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do sleep 1; done
+        echo "APT-Locks freigegeben."
+      changed_when: false
+
     - name: Paketlisten aktualisieren
-      apt:
-        update_cache: yes
+      shell: |
+        DEBIAN_FRONTEND=noninteractive apt-get update -y
       register: update_result
 
     - name: Upgrade mit Sicherung neuer Konfigurationsdateien
@@ -40,3 +52,11 @@
           Keine neuen oder geänderten Konfigurationsdateien gefunden.
           {% endif %}
       when: new_configs.stdout_lines | length > 0
+
+    - name: Ergebnis - Paketlisten aktualisieren
+      debug:
+        var: update_result.stdout_lines
+
+    - name: Ergebnis - Upgrade
+      debug:
+        var: upgrade_result.stdout_lines
