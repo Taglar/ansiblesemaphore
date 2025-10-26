@@ -93,16 +93,17 @@
       mode: '0644'
       when: new_configs.matched | int > 0
 
-    - name: Prüfe und sichere jede gefundene neue Konfigurationsdatei, erstelle Diff und markiere kritische Dateien
-      loop: "{{ new_configs.files | default([]) }}"
-      when: new_configs.matched | int > 0
-      changed_when: false
+    - name: Neue Konfigurationsdateien sichern und Diff erstellen
       vars:
         orig: "{{ item.path | regex_replace('\\.dpkg-new$','') | regex_replace('\\.dpkg-dist$','') | regex_replace('\\.ucf-old$','') }}"
         name_sanitized: "{{ item.path | regex_replace('^/','') | regex_replace('/','_') }}"
         orig_sanitized: "{{ orig | regex_replace('^/','') | regex_replace('/','_') }}"
+      loop: "{{ new_configs.files | default([]) }}"
+      loop_control:
+        label: "{{ item.path }}"
+      when: new_configs.matched | int > 0
       block:
-        - name: Backup: neue Datei kopieren
+        - name: Neue Datei sichern
           copy:
             src: "{{ item.path }}"
             dest: "{{ backup_dir }}/new__{{ name_sanitized }}"
@@ -110,12 +111,12 @@
             group: root
             mode: '0644'
 
-        - name: Backup: Originaldatei kopieren (falls vorhanden)
+        - name: Prüfe, ob Original existiert
           stat:
             path: "{{ orig }}"
           register: orig_stat
 
-        - name: Kopiere Original ins Backup (falls vorhanden)
+        - name: Original sichern (falls vorhanden)
           when: orig_stat.stat.exists | default(false)
           copy:
             src: "{{ orig }}"
@@ -124,7 +125,7 @@
             group: root
             mode: '0644'
 
-        - name: Diff in Log schreiben (falls Original existiert)
+        - name: Diff erstellen (falls Original existiert)
           when: orig_stat.stat.exists | default(false)
           shell: |
             echo "### Diff: {{ orig }} ↔ {{ item.path }}" >> "{{ log_diff }}"
@@ -134,14 +135,7 @@
             warn: false
           changed_when: false
 
-        - name: Notiere Datei in Liste
-          lineinfile:
-            path: "{{ log_list }}"
-            line: "{{ item.path }}"
-            create: yes
-          changed_when: false
-
-        - name: Falls Original fehlt, notiere das im Diff-Log
+        - name: Falls kein Original existiert, im Diff-Log vermerken
           when: not (orig_stat.stat.exists | default(false))
           lineinfile:
             path: "{{ log_diff }}"
@@ -149,12 +143,19 @@
             create: yes
           changed_when: false
 
-        - name: Falls Datei unter kritischem Pfad liegt, zu critical_files hinzufügen
+        - name: Datei in Log-Liste aufnehmen
+          lineinfile:
+            path: "{{ log_list }}"
+            line: "{{ item.path }}"
+            create: yes
+          changed_when: false
+
+        - name: Wenn Datei unter kritischem Pfad liegt, merken
           when: critical_paths | select('search', item.path) | list | length > 0
           set_fact:
             critical_files: "{{ critical_files + [ item.path ] }}"
 
-    - name: Ausgabe: gefundene kritische Konfigurationsdateien (falls vorhanden)
+    - name: Kritische Dateien anzeigen (falls vorhanden)
       debug:
         msg:
           - "Kritische Konfigurationsdateien gefunden: {{ critical_files | default([]) }}"
