@@ -17,7 +17,6 @@
       - "/etc/hostname"
 
   tasks:
-
     - name: Initialisiere Variablen
       set_fact:
         critical_files: []
@@ -96,7 +95,7 @@
         - "{{ log_diff | dirname }}"
       changed_when: false
 
-    - name: Header für Diff-Log anlegen
+    - name: Header für Diff-Log anlegen (wenn Dateien gefunden)
       when: new_configs.matched | int > 0
       copy:
         dest: "{{ log_diff }}"
@@ -120,12 +119,12 @@
 
     - name: Neue Dateien sichern
       copy:
-        remote_src: true
         src: "{{ item.path }}"
         dest: "{{ backup_dir }}/new__{{ item.path | regex_replace('^/','') | regex_replace('/','_') }}"
         owner: root
         group: root
         mode: '0644'
+        remote_src: true
       loop: "{{ new_configs.files | default([]) }}"
       when: new_configs.matched | int > 0
 
@@ -138,28 +137,27 @@
 
     - name: Originaldateien sichern (falls vorhanden)
       copy:
-        remote_src: true
         src: "{{ item.item.path | regex_replace('\\.dpkg-new$','') | regex_replace('\\.dpkg-dist$','') | regex_replace('\\.ucf-old$','') }}"
         dest: "{{ backup_dir }}/orig__{{ item.item.path | regex_replace('^/','') | regex_replace('/','_') }}"
         owner: root
         group: root
         mode: '0644'
+        remote_src: true
       loop: "{{ orig_stat_list.results | selectattr('stat.exists', 'defined') | selectattr('stat.exists') | list }}"
       when: new_configs.matched | int > 0
 
-    - name: Diff-Logs erstellen (ohne warn:)
-      shell: |
-        orig="{{ item.path | regex_replace('\\.dpkg-new$','') | regex_replace('\\.dpkg-dist$','') | regex_replace('\\.ucf-old$','') }}"
+    - name: Diff-Logs erstellen
+      command: >
+        bash -c 'orig="{{ item.path | regex_replace("\\.dpkg-new$","") | regex_replace("\\.dpkg-dist$","") | regex_replace("\\.ucf-old$","") }}";
         if [ -f "$orig" ]; then
-          echo "### Diff: $orig ↔ {{ item.path }}" >> "{{ log_diff }}"
-          diff -u "$orig" "{{ item.path }}" >> "{{ log_diff }}" || true
-          echo "" >> "{{ log_diff }}"
+          echo "### Diff: $orig ↔ {{ item.path }}" >> "{{ log_diff }}";
+          diff -u "$orig" "{{ item.path }}" >> "{{ log_diff }}" || true;
+          echo "" >> "{{ log_diff }}";
         else
-          echo "### Keine Originaldatei gefunden für {{ item.path }}" >> "{{ log_diff }}"
-        fi
+          echo "### Keine Originaldatei gefunden für {{ item.path }}" >> "{{ log_diff }}";
+        fi'
       loop: "{{ new_configs.files | default([]) }}"
       changed_when: false
-      ignore_errors: true
       when: new_configs.matched | int > 0
 
     - name: Neue Dateien in Logliste eintragen
@@ -221,7 +219,8 @@
     - name: APT-History ausgeben
       debug:
         msg: "{{ apt_history.stdout_lines | default(['Keine APT-History gefunden']) }}"
-        - name: Änderungsübersicht als Markdown-Report erstellen
+
+    - name: Änderungsübersicht als Markdown-Report erstellen
       copy:
         dest: "/var/log/apt_changes_report_{{ timestamp_safe }}.md"
         content: |
@@ -260,7 +259,6 @@
           {% else %}
           *(Keine APT-History gefunden)*
           {% endif %}
-
       owner: root
       group: root
       mode: '0644'
