@@ -221,3 +221,46 @@
     - name: APT-History ausgeben
       debug:
         msg: "{{ apt_history.stdout_lines | default(['Keine APT-History gefunden']) }}"
+        - name: Änderungsübersicht als Markdown-Report erstellen
+      copy:
+        dest: "/var/log/apt_changes_report_{{ timestamp_safe }}.md"
+        content: |
+          # Änderungsübersicht APT-Upgrade – {{ ansible_date_time.iso8601 }}
+
+          **System:** {{ inventory_hostname }}
+          **Zeitpunkt:** {{ ansible_date_time.date }} {{ ansible_date_time.time }}
+
+          ---
+          ## 🧩 Zusammenfassung
+          - Gesamtanzahl gefundener Konfigurationsdateien: {{ new_configs.matched | default(0) }}
+          - Kritische Dateien: {{ (critical_files | length) if (critical_files is defined) else 0 }}
+          - Backup-Verzeichnis: `{{ backup_dir }}`
+          - Diff-Log: `{{ log_diff }}`
+          - Liste: `{{ log_list }}`
+
+          ---
+          ## 📁 Gefundene neue oder geänderte Konfigurationsdateien:
+          {% if new_configs.files | length > 0 %}
+          {% for item in new_configs.files %}
+          - **{{ item.path }}**
+            - Typ: {{ 'Kritisch ⚠️' if item.path in (critical_files | default([])) else 'Unkritisch ✅' }}
+            - Original: {{ item.path | regex_replace('\\.dpkg-new$','') | regex_replace('\\.dpkg-dist$','') | regex_replace('\\.ucf-old$','') }}
+            - Backup: {{ backup_dir }}/new__{{ item.path | regex_replace('^/','') | regex_replace('/','_') }}
+          {% endfor %}
+          {% else %}
+          Keine neuen Konfigurationsdateien gefunden.
+          {% endif %}
+
+          ---
+          ## 📜 Letzter APT-History-Eintrag:
+          {% if apt_history.stdout_lines is defined %}
+          ```
+          {{ apt_history.stdout }}
+          ```
+          {% else %}
+          *(Keine APT-History gefunden)*
+          {% endif %}
+
+      owner: root
+      group: root
+      mode: '0644'
