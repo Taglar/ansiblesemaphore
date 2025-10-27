@@ -259,6 +259,6 @@
           {% else %}
           *(Keine APT-History gefunden)*
           {% endif %}
-      owner: root
-      group: root
-      mode: '0644'
+        owner: root
+        group: root
+        mode: '0644'
