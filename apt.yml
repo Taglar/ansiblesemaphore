@@ -18,148 +18,124 @@
       - "/etc/hostname"
 
   tasks:
-    - name: Initialisiere Variablen
-      set_fact:
-        critical_files: []
 
-    # ------------------------------------------------------------
-    # Locks prüfen und ggf. warten
-    # ------------------------------------------------------------
-    - name: Prüfe und warte auf freie APT-/DPKG-Locks
-      shell: |
-        for LOCK in /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock; do
-          if [ -e "$LOCK" ]; then
-            if fuser "$LOCK" >/dev/null 2>&1; then
-              echo "APT-Lock aktiv auf $LOCK – warte..."
-              ATTEMPTS=0
-              while [ "$ATTEMPTS" -lt 30 ]; do
-                sleep 10
-                if ! fuser "$LOCK" >/dev/null 2>&1; then
-                  echo "$LOCK wurde freigegeben"
-                  break
-                fi
-                ATTEMPTS=$((ATTEMPTS+1))
-              done
-              if [ "$ATTEMPTS" -eq 30 ]; then
-                echo "Timeout: Lock $LOCK nach 5 Minuten immer noch aktiv."
-                exit 1
+  - name: Initialisiere Variablen
+    set_fact:
+      critical_files: []
+
+  - name: Prüfe und warte auf freie APT-/DPKG-Locks
+    shell: |
+      for LOCK in /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock; do
+        if [ -e "$LOCK" ]; then
+          if fuser "$LOCK" >/dev/null 2>&1; then
+            echo "APT-Lock aktiv auf $LOCK – warte..."
+            ATTEMPTS=0
+            while [ "$ATTEMPTS" -lt 30 ]; do
+              sleep 10
+              if ! fuser "$LOCK" >/dev/null 2>&1; then
+                echo "$LOCK wurde freigegeben"
+                break
               fi
-            else
-              echo "Kein Prozess für $LOCK gefunden – entferne verwaiste Lock-Datei."
-              rm -f "$LOCK"
+              ATTEMPTS=$((ATTEMPTS+1))
+            done
+            if [ "$ATTEMPTS" -eq 30 ]; then
+              echo "Timeout: Lock $LOCK nach 5 Minuten immer noch aktiv."
+              exit 1
             fi
+          else
+            echo "Kein Prozess für $LOCK gefunden – entferne verwaiste Lock-Datei."
+            rm -f "$LOCK"
           fi
-        done
-      register: lock_check
-      changed_when: false
-      failed_when: lock_check.rc != 0
+        fi
+      done
+    register: lock_check
+    changed_when: false
+    failed_when: lock_check.rc != 0
 
-    # ------------------------------------------------------------
-    # APT vorbereiten
-    # ------------------------------------------------------------
-    - name: Stelle sicher, dass psmisc (fuser) vorhanden ist
-      apt:
-        name: psmisc
-        state: present
-        update_cache: false
+  - name: Stelle sicher, dass psmisc (fuser) vorhanden ist
+    apt:
+      name: psmisc
+      state: present
+      update_cache: false
 
-    # ------------------------------------------------------------
-    # Diagnose- und Fehler-tolerantes Update
-    # ------------------------------------------------------------
-    - name: Paketquellen aktualisieren (Fehler ignorieren)
-      shell: |
-        echo "===== APT-Update gestartet: {{ ansible_date_time.iso8601 }} =====" > "{{ diagnose_log }}"
-        apt-get update -o Acquire::Retries=2 -o Acquire::http::Timeout=20 2>&1 | tee -a "{{ diagnose_log }}"
-        echo "" >> "{{ diagnose_log }}"
-      register: apt_update_output
-      changed_when: "'Paketlisten werden gelesen' in apt_update_output.stdout"
-      failed_when: false
+  - name: Paketquellen aktualisieren (Fehler ignorieren)
+    shell: |
+      echo "===== APT-Update gestartet: {{ ansible_date_time.iso8601 }} =====" > "{{ diagnose_log }}"
+      apt-get update -o Acquire::Retries=2 -o Acquire::http::Timeout=20 2>&1 | tee -a "{{ diagnose_log }}"
+      echo "" >> "{{ diagnose_log }}"
+    register: apt_update_output
+    changed_when: "'Paketlisten werden gelesen' in apt_update_output.stdout"
+    failed_when: false
 
-    # ------------------------------------------------------------
-    # Fehlerdiagnose für Repositories
-    # ------------------------------------------------------------
-    - name: Fehlerdiagnose: Prüfe auf APT/GPG-Probleme
-      shell: |
-        grep -E 'Fehl:|W:|GPG|EXPKEYSIG|KEYEXPIRED|NO_PUBKEY|Fehlschlag|nicht unterstützt' "{{ diagnose_log }}" || true
-      register: apt_diag_filtered
-      changed_when: false
-      failed_when: false
+  - name: Fehlerdiagnose – prüfe auf APT/GPG-Probleme
+    shell: |
+      grep -E 'Fehl:|W:|GPG|EXPKEYSIG|KEYEXPIRED|NO_PUBKEY|Fehlschlag|nicht unterstützt' "{{ diagnose_log }}" || true
+    register: apt_diag_filtered
+    changed_when: false
+    failed_when: false
 
-    - name: Zusammenfassung der Update-Diagnose anzeigen
-      debug:
-        msg: >
-          {{ apt_diag_filtered.stdout_lines | default(['Keine Repository-Fehler erkannt.']) }}
+  - name: Zusammenfassung der Update-Diagnose anzeigen
+    debug:
+      msg: "{{ apt_diag_filtered.stdout_lines | default(['Keine Repository-Fehler erkannt.']) }}"
 
-    # ------------------------------------------------------------
-    # Upgrade (ohne Abbruch bei Repos-Fehlern)
-    # ------------------------------------------------------------
-    - name: Upgrade ausführen (bestehende Konfigurationen behalten)
-      apt:
-        upgrade: yes
-        force_apt_get: yes
-        dpkg_options:
-          - "--force-confdef"
-          - "--force-confold"
-      register: upgrade_result
-      failed_when: false
+  - name: Upgrade ausführen (bestehende Konfigurationen behalten)
+    apt:
+      upgrade: yes
+      force_apt_get: yes
+      dpkg_options:
+        - "--force-confdef"
+        - "--force-confold"
+    register: upgrade_result
+    failed_when: false
 
-    # ------------------------------------------------------------
-    # Nach Konfigurationsänderungen suchen
-    # ------------------------------------------------------------
-    - name: Nach neuen/alten Konfigurationsdateien suchen
-      find:
-        paths: "{{ critical_paths + ['/etc'] | unique }}"
-        file_type: file
-        patterns:
-          - "*.dpkg-new"
-          - "*.dpkg-dist"
-          - "*.ucf-old"
-      register: new_configs
-      changed_when: false
-      failed_when: false
+  - name: Nach neuen/alten Konfigurationsdateien suchen
+    find:
+      paths: "{{ critical_paths + ['/etc'] | unique }}"
+      file_type: file
+      patterns:
+        - "*.dpkg-new"
+        - "*.dpkg-dist"
+        - "*.ucf-old"
+    register: new_configs
+    changed_when: false
+    failed_when: false
 
-    # ------------------------------------------------------------
-    # Header & Backup-Verzeichnisse anlegen
-    # ------------------------------------------------------------
-    - name: Verzeichnisse für Backups/Logs anlegen
-      file:
-        path: "{{ item }}"
-        state: directory
-        owner: root
-        group: root
-        mode: '0755'
-      loop:
-        - "{{ backup_dir }}"
-        - "{{ log_diff | dirname }}"
-      changed_when: false
+  - name: Verzeichnisse für Backups/Logs anlegen
+    file:
+      path: "{{ item }}"
+      state: directory
+      owner: root
+      group: root
+      mode: '0755'
+    loop:
+      - "{{ backup_dir }}"
+      - "{{ log_diff | dirname }}"
+    changed_when: false
 
-    - name: Header für Diff- und Änderungslogs anlegen
-      when: new_configs.matched | int > 0
-      block:
-        - copy:
-            dest: "{{ log_diff }}"
-            content: |
-              Vergleich neuer Konfigurationsdateien – {{ ansible_date_time.iso8601 }}
-              ------------------------------------------------------------
-            owner: root
-            group: root
-            mode: '0644'
-        - copy:
-            dest: "{{ log_list }}"
-            content: |
-              Upgrade-Datum: {{ ansible_date_time.iso8601 }}
-              ------------------------------------------------------------
-            owner: root
-            group: root
-            mode: '0644'
+  - name: Header für Diff- und Änderungslogs anlegen
+    when: new_configs.matched | int > 0
+    block:
+      - copy:
+          dest: "{{ log_diff }}"
+          content: |
+            Vergleich neuer Konfigurationsdateien – {{ ansible_date_time.iso8601 }}
+            ------------------------------------------------------------
+          owner: root
+          group: root
+          mode: '0644'
+      - copy:
+          dest: "{{ log_list }}"
+          content: |
+            Upgrade-Datum: {{ ansible_date_time.iso8601 }}
+            ------------------------------------------------------------
+          owner: root
+          group: root
+          mode: '0644'
 
-    # ------------------------------------------------------------
-    # Optional: Nur Info-Ausgabe
-    # ------------------------------------------------------------
-    - name: APT-Upgrade-Ergebnis anzeigen
-      debug:
-        var: upgrade_result
+  - name: APT-Upgrade-Ergebnis anzeigen
+    debug:
+      var: upgrade_result
 
-    - name: Hinweis auf Diagnose-Log
-      debug:
-        msg: "APT-Diagnoseprotokoll gespeichert unter {{ diagnose_log }}"
+  - name: Hinweis auf Diagnose-Log
+    debug:
+      msg: "APT-Diagnoseprotokoll gespeichert unter {{ diagnose_log }}"
