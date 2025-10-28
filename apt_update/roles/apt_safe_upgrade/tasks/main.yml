@@ -1,6 +1,0 @@
---- 
-# Rolle: apt_safe_upgrade
-# Zweck: Sicheres Update & Upgrade über APT mit Backup und Diff neuer Konfigurationsdateien
-- name: Initialisiere Variablen
-  set_fact:
-    critical_files: []
