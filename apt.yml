@@ -21,6 +21,7 @@
       set_fact:
         critical_files: []
 
+    # Warte auf freie dpkg/apt-Locks (robust, ohne Bash-Arrays)
     - name: Prüfe und warte auf freie APT-/DPKG-Locks
       shell: |
         for LOCK in /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock; do
@@ -56,12 +57,29 @@
         state: present
         update_cache: false
 
-    - name: Paketquellen aktualisieren
+    # Paketquellen tolerant aktualisieren (kein Abbruch bei Fehlern)
+    - name: Paketquellen aktualisieren (tolerant)
       apt:
         update_cache: yes
         cache_valid_time: 3600
       register: update_result
+      failed_when: false
+      changed_when: "'changed' in update_result and update_result.changed"
 
+    # Fehlerdiagnose für Repositories
+    - name: Fehlerdiagnose: Prüfe auf APT/GPG-Probleme
+      shell: |
+        apt-get update 2>&1 | grep -E 'Fehl:|W:|GPG|EXPKEYSIG|KEYEXPIRED|NO_PUBKEY' || true
+      register: apt_diag
+      changed_when: false
+      failed_when: false
+
+    - name: Zeige erkannte APT-Probleme
+      when: apt_diag.stdout | length > 0
+      debug:
+        msg: "{{ apt_diag.stdout_lines }}"
+
+    # Upgrade mit Beibehaltung vorhandener Konfigurationen
     - name: Upgrade ausführen (bestehende Konfigurationen behalten)
       apt:
         upgrade: yes
@@ -70,6 +88,7 @@
           - "--force-confdef"
           - "--force-confold"
       register: upgrade_result
+      failed_when: false
 
     - name: Nach neuen/alten Konfigurationsdateien suchen
       find:
@@ -95,7 +114,7 @@
         - "{{ log_diff | dirname }}"
       changed_when: false
 
-    - name: Header für Diff-Log anlegen (wenn Dateien gefunden)
+    - name: Header für Diff-Log anlegen
       when: new_configs.matched | int > 0
       copy:
         dest: "{{ log_diff }}"
@@ -148,54 +167,24 @@
 
     - name: Diff-Logs erstellen
       command: >
-        bash -c 'orig="{{ item.path | regex_replace("\\.dpkg-new$","") | regex_replace("\\.dpkg-dist$","") | regex_replace("\\.ucf-old$","") }}";
-        if [ -f "$orig" ]; then
-          echo "### Diff: $orig ↔ {{ item.path }}" >> "{{ log_diff }}";
-          diff -u "$orig" "{{ item.path }}" >> "{{ log_diff }}" || true;
-          echo "" >> "{{ log_diff }}";
-        else
-          echo "### Keine Originaldatei gefunden für {{ item.path }}" >> "{{ log_diff }}";
-        fi'
+        diff -u
+        {{ item.path | regex_replace('\\.dpkg-new$','') | regex_replace('\\.dpkg-dist$','') | regex_replace('\\.ucf-old$','') }}
+        {{ item.path }}
+      register: diff_output
+      ignore_errors: true
       loop: "{{ new_configs.files | default([]) }}"
       changed_when: false
       when: new_configs.matched | int > 0
 
-    - name: Neue Dateien in Logliste eintragen
+    - name: Schreibe Diff-Ausgaben in Logdatei
       lineinfile:
-        path: "{{ log_list }}"
-        line: "{{ item.path }}"
-        create: yes
-      loop: "{{ new_configs.files | default([]) }}"
-      changed_when: false
+        path: "{{ log_diff }}"
+        line: |
+          ### Diff: {{ item.item.path }}
+          {{ item.stdout | default('Keine Unterschiede oder Datei fehlt') }}
+      loop: "{{ diff_output.results | default([]) }}"
       when: new_configs.matched | int > 0
-
-    - name: Kritische Dateien erkennen
-      set_fact:
-        critical_files: "{{ critical_files + [ item.path ] }}"
-      when: critical_paths | select('search', item.path) | list | length > 0
-      loop: "{{ new_configs.files | default([]) }}"
       changed_when: false
-
-    - name: Kritische Dateien anzeigen
-      debug:
-        msg:
-          - "Kritische Konfigurationsdateien gefunden: {{ critical_files | default([]) }}"
-          - "Backups und Diffs liegen in: {{ backup_dir }}, {{ log_diff }}, {{ log_list }}"
-      when: critical_files | length > 0
-
-    - name: Alte Backups älter als 14 Tage löschen
-      find:
-        paths: /var/backups
-        age: 14d
-        patterns: "apt_config_*"
-      register: old_backups
-
-    - name: Entferne alte Backups
-      file:
-        path: "{{ item.path }}"
-        state: absent
-      loop: "{{ old_backups.files }}"
-      when: old_backups.matched | int > 0
 
     - name: APT-Update-Ergebnis anzeigen
       debug:
@@ -219,46 +208,3 @@
     - name: APT-History ausgeben
       debug:
         msg: "{{ apt_history.stdout_lines | default(['Keine APT-History gefunden']) }}"
-
-    - name: Änderungsübersicht als Markdown-Report erstellen
-      copy:
-        dest: "/var/log/apt_changes_report_{{ timestamp_safe }}.md"
-        content: |
-          # Änderungsübersicht APT-Upgrade – {{ ansible_date_time.iso8601 }}
-
-          **System:** {{ inventory_hostname }}
-          **Zeitpunkt:** {{ ansible_date_time.date }} {{ ansible_date_time.time }}
-
-          ---
-          ## 🧩 Zusammenfassung
-          - Gesamtanzahl gefundener Konfigurationsdateien: {{ new_configs.matched | default(0) }}
-          - Kritische Dateien: {{ (critical_files | length) if (critical_files is defined) else 0 }}
-          - Backup-Verzeichnis: `{{ backup_dir }}`
-          - Diff-Log: `{{ log_diff }}`
-          - Liste: `{{ log_list }}`
-
-          ---
-          ## 📁 Gefundene neue oder geänderte Konfigurationsdateien:
-          {% if new_configs.files | length > 0 %}
-          {% for item in new_configs.files %}
-          - **{{ item.path }}**
-            - Typ: {{ 'Kritisch ⚠️' if item.path in (critical_files | default([])) else 'Unkritisch ✅' }}
-            - Original: {{ item.path | regex_replace('\\.dpkg-new$','') | regex_replace('\\.dpkg-dist$','') | regex_replace('\\.ucf-old$','') }}
-            - Backup: {{ backup_dir }}/new__{{ item.path | regex_replace('^/','') | regex_replace('/','_') }}
-          {% endfor %}
-          {% else %}
-          Keine neuen Konfigurationsdateien gefunden.
-          {% endif %}
-
-          ---
-          ## 📜 Letzter APT-History-Eintrag:
-          {% if apt_history.stdout_lines is defined %}
-          ```
-          {{ apt_history.stdout }}
-          ```
-          {% else %}
-          *(Keine APT-History gefunden)*
-          {% endif %}
-        owner: root
-        group: root
-        mode: '0644'
