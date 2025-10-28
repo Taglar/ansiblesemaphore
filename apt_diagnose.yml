@@ -1,0 +1,35 @@
+---
+- hosts: LinuxUbuntu
+  become: true
+  become_method: sudo
+  become_user: root
+
+  vars:
+    timestamp_safe: "{{ (ansible_date_time.date ~ '_' ~ ansible_date_time.time) | regex_replace(':','') }}"
+    diagnose_log: "/var/log/apt_diagnose_{{ timestamp_safe }}.log"
+
+  tasks:
+    - name: Starte Diagnose-APT-Update (mit Protokollierung)
+      shell: |
+        echo "===== APT-Diagnose gestartet: {{ ansible_date_time.iso8601 }} =====" > "{{ diagnose_log }}"
+        echo "" >> "{{ diagnose_log }}"
+        apt-get update 2>&1 | tee -a "{{ diagnose_log }}"
+      register: apt_diag_full
+      changed_when: false
+      failed_when: false
+
+    - name: Extrahiere relevante Warnungen und Fehler
+      shell: |
+        grep -E 'Fehl:|W:|GPG|EXPKEYSIG|KEYEXPIRED|NO_PUBKEY|Fehlschlag|nicht unterstützt' "{{ diagnose_log }}" || true
+      register: apt_diag_filtered
+      changed_when: false
+      failed_when: false
+
+    - name: Zeige zusammengefasste Diagnose
+      debug:
+        msg: >
+          {{ apt_diag_filtered.stdout_lines | default(['Keine Probleme erkannt – alle Quellen erreichbar.']) }}
+
+    - name: Hinweis auf Logdatei
+      debug:
+        msg: "Vollständiges Log gespeichert unter {{ diagnose_log }}"
