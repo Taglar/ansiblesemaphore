@@ -9,6 +9,7 @@
     log_diff: "/var/log/config_diffs_{{ timestamp_safe }}.txt"
     log_list: "/var/log/config_changes_{{ timestamp_safe }}.txt"
     backup_dir: "/var/backups/apt_config_{{ timestamp_safe }}"
+    diagnose_log: "/var/log/apt_diagnose_{{ timestamp_safe }}.log"
     critical_paths:
       - "/etc/ssh"
       - "/etc/network"
@@ -21,7 +22,9 @@
       set_fact:
         critical_files: []
 
-    # Warte auf freie dpkg/apt-Locks (robust, ohne Bash-Arrays)
+    # ------------------------------------------------------------
+    # Locks prüfen und ggf. warten
+    # ------------------------------------------------------------
     - name: Prüfe und warte auf freie APT-/DPKG-Locks
       shell: |
         for LOCK in /var/lib/dpkg/lock /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock; do
@@ -51,35 +54,45 @@
       changed_when: false
       failed_when: lock_check.rc != 0
 
+    # ------------------------------------------------------------
+    # APT vorbereiten
+    # ------------------------------------------------------------
     - name: Stelle sicher, dass psmisc (fuser) vorhanden ist
       apt:
         name: psmisc
         state: present
         update_cache: false
 
-    # Paketquellen tolerant aktualisieren (kein Abbruch bei Fehlern)
-    - name: Paketquellen aktualisieren (tolerant)
-      apt:
-        update_cache: yes
-        cache_valid_time: 3600
-      register: update_result
+    # ------------------------------------------------------------
+    # Diagnose- und Fehler-tolerantes Update
+    # ------------------------------------------------------------
+    - name: Paketquellen aktualisieren (Fehler ignorieren)
+      shell: |
+        echo "===== APT-Update gestartet: {{ ansible_date_time.iso8601 }} =====" > "{{ diagnose_log }}"
+        apt-get update -o Acquire::Retries=2 -o Acquire::http::Timeout=20 2>&1 | tee -a "{{ diagnose_log }}"
+        echo "" >> "{{ diagnose_log }}"
+      register: apt_update_output
+      changed_when: "'Paketlisten werden gelesen' in apt_update_output.stdout"
       failed_when: false
-      changed_when: "'changed' in update_result and update_result.changed"
 
+    # ------------------------------------------------------------
     # Fehlerdiagnose für Repositories
+    # ------------------------------------------------------------
     - name: Fehlerdiagnose: Prüfe auf APT/GPG-Probleme
       shell: |
-        apt-get update 2>&1 | grep -E 'Fehl:|W:|GPG|EXPKEYSIG|KEYEXPIRED|NO_PUBKEY' || true
-      register: apt_diag
+        grep -E 'Fehl:|W:|GPG|EXPKEYSIG|KEYEXPIRED|NO_PUBKEY|Fehlschlag|nicht unterstützt' "{{ diagnose_log }}" || true
+      register: apt_diag_filtered
       changed_when: false
       failed_when: false
 
-    - name: Zeige erkannte APT-Probleme
-      when: apt_diag.stdout | length > 0
+    - name: Zusammenfassung der Update-Diagnose anzeigen
       debug:
-        msg: "{{ apt_diag.stdout_lines }}"
+        msg: >
+          {{ apt_diag_filtered.stdout_lines | default(['Keine Repository-Fehler erkannt.']) }}
 
-    # Upgrade mit Beibehaltung vorhandener Konfigurationen
+    # ------------------------------------------------------------
+    # Upgrade (ohne Abbruch bei Repos-Fehlern)
+    # ------------------------------------------------------------
     - name: Upgrade ausführen (bestehende Konfigurationen behalten)
       apt:
         upgrade: yes
@@ -90,6 +103,9 @@
       register: upgrade_result
       failed_when: false
 
+    # ------------------------------------------------------------
+    # Nach Konfigurationsänderungen suchen
+    # ------------------------------------------------------------
     - name: Nach neuen/alten Konfigurationsdateien suchen
       find:
         paths: "{{ critical_paths + ['/etc'] | unique }}"
@@ -102,6 +118,9 @@
       changed_when: false
       failed_when: false
 
+    # ------------------------------------------------------------
+    # Header & Backup-Verzeichnisse anlegen
+    # ------------------------------------------------------------
     - name: Verzeichnisse für Backups/Logs anlegen
       file:
         path: "{{ item }}"
@@ -114,97 +133,33 @@
         - "{{ log_diff | dirname }}"
       changed_when: false
 
-    - name: Header für Diff-Log anlegen
+    - name: Header für Diff- und Änderungslogs anlegen
       when: new_configs.matched | int > 0
-      copy:
-        dest: "{{ log_diff }}"
-        content: |
-          Vergleich neuer Konfigurationsdateien – {{ ansible_date_time.iso8601 }}
-          ------------------------------------------------------------
-        owner: root
-        group: root
-        mode: '0644'
+      block:
+        - copy:
+            dest: "{{ log_diff }}"
+            content: |
+              Vergleich neuer Konfigurationsdateien – {{ ansible_date_time.iso8601 }}
+              ------------------------------------------------------------
+            owner: root
+            group: root
+            mode: '0644'
+        - copy:
+            dest: "{{ log_list }}"
+            content: |
+              Upgrade-Datum: {{ ansible_date_time.iso8601 }}
+              ------------------------------------------------------------
+            owner: root
+            group: root
+            mode: '0644'
 
-    - name: Header für Liste der neuen Konfigurationsdateien anlegen
-      when: new_configs.matched | int > 0
-      copy:
-        dest: "{{ log_list }}"
-        content: |
-          Upgrade-Datum: {{ ansible_date_time.iso8601 }}
-          ------------------------------------------------------------
-        owner: root
-        group: root
-        mode: '0644'
-
-    - name: Neue Dateien sichern
-      copy:
-        src: "{{ item.path }}"
-        dest: "{{ backup_dir }}/new__{{ item.path | regex_replace('^/','') | regex_replace('/','_') }}"
-        owner: root
-        group: root
-        mode: '0644'
-        remote_src: true
-      loop: "{{ new_configs.files | default([]) }}"
-      when: new_configs.matched | int > 0
-
-    - name: Prüfe, ob Originaldateien existieren
-      stat:
-        path: "{{ item.path | regex_replace('\\.dpkg-new$','') | regex_replace('\\.dpkg-dist$','') | regex_replace('\\.ucf-old$','') }}"
-      loop: "{{ new_configs.files | default([]) }}"
-      register: orig_stat_list
-      when: new_configs.matched | int > 0
-
-    - name: Originaldateien sichern (falls vorhanden)
-      copy:
-        src: "{{ item.item.path | regex_replace('\\.dpkg-new$','') | regex_replace('\\.dpkg-dist$','') | regex_replace('\\.ucf-old$','') }}"
-        dest: "{{ backup_dir }}/orig__{{ item.item.path | regex_replace('^/','') | regex_replace('/','_') }}"
-        owner: root
-        group: root
-        mode: '0644'
-        remote_src: true
-      loop: "{{ orig_stat_list.results | selectattr('stat.exists', 'defined') | selectattr('stat.exists') | list }}"
-      when: new_configs.matched | int > 0
-
-    - name: Diff-Logs erstellen
-      command: >
-        diff -u
-        {{ item.path | regex_replace('\\.dpkg-new$','') | regex_replace('\\.dpkg-dist$','') | regex_replace('\\.ucf-old$','') }}
-        {{ item.path }}
-      register: diff_output
-      ignore_errors: true
-      loop: "{{ new_configs.files | default([]) }}"
-      changed_when: false
-      when: new_configs.matched | int > 0
-
-    - name: Schreibe Diff-Ausgaben in Logdatei
-      lineinfile:
-        path: "{{ log_diff }}"
-        line: |
-          ### Diff: {{ item.item.path }}
-          {{ item.stdout | default('Keine Unterschiede oder Datei fehlt') }}
-      loop: "{{ diff_output.results | default([]) }}"
-      when: new_configs.matched | int > 0
-      changed_when: false
-
-    - name: APT-Update-Ergebnis anzeigen
-      debug:
-        var: update_result
-
+    # ------------------------------------------------------------
+    # Optional: Nur Info-Ausgabe
+    # ------------------------------------------------------------
     - name: APT-Upgrade-Ergebnis anzeigen
       debug:
         var: upgrade_result
 
-    - name: Letzten APT-History-Eintrag anzeigen
-      shell: |
-        if [ -f /var/log/apt/history.log ]; then
-          tac /var/log/apt/history.log | awk '/^Start-Date/{p=1} p; /^End-Date/{exit}' | tac
-        else
-          echo "Keine APT-History gefunden"
-        fi
-      register: apt_history
-      changed_when: false
-      failed_when: false
-
-    - name: APT-History ausgeben
+    - name: Hinweis auf Diagnose-Log
       debug:
-        msg: "{{ apt_history.stdout_lines | default(['Keine APT-History gefunden']) }}"
+        msg: "APT-Diagnoseprotokoll gespeichert unter {{ diagnose_log }}"
