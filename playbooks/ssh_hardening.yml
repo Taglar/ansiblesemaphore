@@ -1,116 +1,84 @@
 ---
-- name: SSH Hardening und Benutzeranlage
-  hosts: LinuxUbuntu
+- hosts: Ohne_SSH_Key
   become: true
   become_method: sudo
+  become_user: root
 
   vars:
-    juergen_user: juergen
-    juergen_group: juergen
-    sudoers_file: "/etc/sudoers.d/90-juergen"
-    sshd_config_path: "/etc/ssh/sshd_config"
+    ssh_user: "{{ secrets.SSH_USER }}"
+    ssh_pub_key: "{{ secrets.SSH_PUBLIC_KEY }}"
+    juergen_password: "{{ secrets.juergen_password }}"
+    root_password: "{{ secrets.root_password }}"
 
   tasks:
 
-    - name: Stelle sicher, dass das Paket sudo vorhanden ist
+    - name: Prüfe Verbindung zum Host
+      ping:
+
+    - name: Stelle sicher, dass sudo installiert ist
       apt:
         name: sudo
         state: present
         update_cache: yes
 
-    - name: Benutzer "{{ juergen_user }}" anlegen
+    - name: Erstelle Benutzer {{ ssh_user }}
       user:
-        name: "{{ juergen_user }}"
+        name: "{{ ssh_user }}"
         password: "{{ juergen_password | password_hash('sha512') }}"
-        shell: /bin/bash
-        create_home: yes
         groups: sudo
-        append: yes
+        shell: /bin/bash
+        state: present
+        create_home: yes
 
-    - name: Authorized_keys Verzeichnis anlegen
+    - name: SSH-Verzeichnis für Benutzer {{ ssh_user }} anlegen
       file:
-        path: "/home/{{ juergen_user }}/.ssh"
+        path: "/home/{{ ssh_user }}/.ssh"
         state: directory
-        owner: "{{ juergen_user }}"
-        group: "{{ juergen_group }}"
+        owner: "{{ ssh_user }}"
+        group: "{{ ssh_user }}"
         mode: '0700'
 
-    - name: SSH Public Key hinterlegen
-      copy:
-        dest: "/home/{{ juergen_user }}/.ssh/authorized_keys"
-        content: "{{ SSH_PUBLIC_KEY }}"
-        owner: "{{ juergen_user }}"
-        group: "{{ juergen_group }}"
-        mode: '0600'
+    - name: SSH-Key für Benutzer {{ ssh_user }} hinterlegen
+      authorized_key:
+        user: "{{ ssh_user }}"
+        key: "{{ ssh_pub_key }}"
+        state: present
+        exclusive: false
 
-    - name: Sudo-Rechte für juergen hinzufügen (ohne Passwort)
+    - name: Root-Login über SSH deaktivieren
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^PermitRootLogin'
+        line: 'PermitRootLogin no'
+        create: yes
+        backup: yes
+      notify: Neustart SSH
+
+    - name: Passwortauthentifizierung deaktivieren (nur noch Key erlaubt)
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^PasswordAuthentication'
+        line: 'PasswordAuthentication no'
+        create: yes
+        backup: yes
+      notify: Neustart SSH
+
+    - name: Sichere sudoers-Datei anlegen (ohne Passwort nötig für {{ ssh_user }})
       copy:
-        dest: "{{ sudoers_file }}"
-        content: "{{ juergen_user }} ALL=(ALL) NOPASSWD:ALL"
+        dest: "/etc/sudoers.d/{{ ssh_user }}"
+        content: "{{ ssh_user }} ALL=(ALL) NOPASSWD:ALL"
         owner: root
         group: root
         mode: '0440'
 
-    - name: Root-Login und Passwort-Authentifizierung deaktivieren
-      lineinfile:
-        path: "{{ sshd_config_path }}"
-        regexp: '^#?PermitRootLogin'
-        line: 'PermitRootLogin no'
-        state: present
-        backrefs: yes
+    - name: Root-Passwort setzen (optional, falls gesetzt)
+      user:
+        name: root
+        password: "{{ root_password | password_hash('sha512') }}"
+      when: root_password is defined and root_password | length > 0
 
-    - name: Passwort-Authentifizierung deaktivieren
-      lineinfile:
-        path: "{{ sshd_config_path }}"
-        regexp: '^#?PasswordAuthentication'
-        line: 'PasswordAuthentication no'
-        state: present
-        backrefs: yes
-
-    - name: SSH-Dienst neu starten
+  handlers:
+    - name: Neustart SSH
       service:
         name: ssh
         state: restarted
-
-    - name: Prüfen, ob SSH-Dienst aktiv ist
-      shell: systemctl is-active ssh
-      register: ssh_status
-      changed_when: false
-
-    - name: Ergebnis anzeigen
-      debug:
-        msg:
-          - "✅ SSH Hardening abgeschlossen."
-          - "👤 Benutzer '{{ juergen_user }}' wurde angelegt und mit SSH-Key versehen."
-          - "🔒 Root-Login ist deaktiviert."
-          - "📡 SSH-Dienststatus: {{ ssh_status.stdout }}"
-
-    # -------------------------------
-    # Sicherheitsprüfung nach Hardening
-    # -------------------------------
-    - name: Warte kurz, bis SSH neu gestartet ist
-      pause:
-        seconds: 5
-
-    - name: Teste SSH-Login mit Benutzer juergen (Key)
-      delegate_to: localhost
-      shell: >
-        ssh -o BatchMode=yes -o ConnectTimeout=5 -i ~/.ssh/id_rsa {{ juergen_user }}@{{ inventory_hostname }} 'echo SSH_Login_OK'
-      register: ssh_juergen_test
-      failed_when: false
-      changed_when: false
-
-    - name: Teste SSH-Login mit Root (sollte fehlschlagen)
-      delegate_to: localhost
-      shell: >
-        ssh -o BatchMode=yes -o ConnectTimeout=5 -i ~/.ssh/id_rsa root@{{ inventory_hostname }} 'echo Root_Login_OK'
-      register: ssh_root_test
-      failed_when: false
-      changed_when: false
-
-    - name: Zusammenfassung der SSH-Tests
-      debug:
-        msg:
-          - "Test Login juergen: {{ '✅ OK' if 'SSH_Login_OK' in ssh_juergen_test.stdout else '❌ FEHLGESCHLAGEN' }}"
-          - "Test Login root: {{ '✅ BLOCKIERT' if ssh_root_test.rc != 0 else '❌ NOCH ZUGÄNGLICH' }}"
-          - "Hinweis: Wenn juergen fehlschlägt, bitte Key oder Firewall prüfen."
