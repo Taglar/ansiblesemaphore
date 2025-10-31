@@ -54,7 +54,6 @@
         group: root
         mode: '0440'
 
-    # SSH-Hardening
     - name: Root-Login via SSH deaktivieren
       ansible.builtin.lineinfile:
         path: /etc/ssh/sshd_config
@@ -70,7 +69,6 @@
         line: 'PubkeyAuthentication yes'
         state: present
 
-    # Optional (vorerst): Passwort-Login für Notzugang erlauben
     - name: PasswordAuthentication (temporär) aktivieren
       ansible.builtin.lineinfile:
         path: /etc/ssh/sshd_config
