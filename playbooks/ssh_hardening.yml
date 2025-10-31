@@ -1,36 +1,32 @@
 ---
-- hosts: Ohne_SSH_Key
+- name: SSH Hardening
+  hosts: Ohne_SSH_Key
   become: true
   become_method: sudo
-  become_user: root
+  gather_facts: yes
 
   vars:
-    ssh_user: "{{ secrets.SSH_USER }}"
-    ssh_pub_key: "{{ secrets.SSH_PUBLIC_KEY }}"
+    ansible_password: "{{ secrets.root_password }}"
+    ssh_user: "{{ SSH_USER }}"
+    ssh_public_key: "{{ secrets.SSH_PUBLIC_KEY }}"
     juergen_password: "{{ secrets.juergen_password }}"
-    root_password: "{{ secrets.root_password }}"
 
   tasks:
-
-    - name: Prüfe Verbindung zum Host
-      ping:
-
-    - name: Stelle sicher, dass sudo installiert ist
-      apt:
-        name: sudo
-        state: present
-        update_cache: yes
-
-    - name: Erstelle Benutzer {{ ssh_user }}
+    - name: Benutzer "{{ ssh_user }}" anlegen
       user:
         name: "{{ ssh_user }}"
         password: "{{ juergen_password | password_hash('sha512') }}"
-        groups: sudo
         shell: /bin/bash
         state: present
         create_home: yes
 
-    - name: SSH-Verzeichnis für Benutzer {{ ssh_user }} anlegen
+    - name: Benutzer "{{ ssh_user }}" zu sudo-Gruppe hinzufügen
+      user:
+        name: "{{ ssh_user }}"
+        groups: sudo
+        append: yes
+
+    - name: SSH-Verzeichnis für Benutzer erstellen
       file:
         path: "/home/{{ ssh_user }}/.ssh"
         state: directory
@@ -38,47 +34,52 @@
         group: "{{ ssh_user }}"
         mode: '0700'
 
-    - name: SSH-Key für Benutzer {{ ssh_user }} hinterlegen
-      authorized_key:
-        user: "{{ ssh_user }}"
-        key: "{{ ssh_pub_key }}"
-        state: present
-        exclusive: false
-
-    - name: Root-Login über SSH deaktivieren
-      lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: '^PermitRootLogin'
-        line: 'PermitRootLogin no'
-        create: yes
-        backup: yes
-      notify: Neustart SSH
-
-    - name: Passwortauthentifizierung deaktivieren (nur noch Key erlaubt)
-      lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: '^PasswordAuthentication'
-        line: 'PasswordAuthentication no'
-        create: yes
-        backup: yes
-      notify: Neustart SSH
-
-    - name: Sichere sudoers-Datei anlegen (ohne Passwort nötig für {{ ssh_user }})
+    - name: SSH Public Key hinzufügen
       copy:
-        dest: "/etc/sudoers.d/{{ ssh_user }}"
-        content: "{{ ssh_user }} ALL=(ALL) NOPASSWD:ALL"
-        owner: root
-        group: root
-        mode: '0440'
+        content: "{{ ssh_public_key }}"
+        dest: "/home/{{ ssh_user }}/.ssh/authorized_keys"
+        owner: "{{ ssh_user }}"
+        group: "{{ ssh_user }}"
+        mode: '0600'
 
-    - name: Root-Passwort setzen (optional, falls gesetzt)
-      user:
-        name: root
-        password: "{{ root_password | password_hash('sha512') }}"
-      when: root_password is defined and root_password | length > 0
+    - name: Sicherstellen, dass Passwort-Login erlaubt ist (nur temporär für juergen)
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication'
+        line: 'PasswordAuthentication yes'
+        state: present
 
-  handlers:
-    - name: Neustart SSH
+    - name: Root-Login per SSH deaktivieren
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: 'PermitRootLogin no'
+        state: present
+
+    - name: PubkeyAuthentication aktivieren
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PubkeyAuthentication'
+        line: 'PubkeyAuthentication yes'
+        state: present
+
+    - name: ChallengeResponseAuthentication deaktivieren
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?ChallengeResponseAuthentication'
+        line: 'ChallengeResponseAuthentication no'
+        state: present
+
+    - name: SSH-Dienst neu starten
       service:
         name: ssh
         state: restarted
+
+    - name: Zusammenfassung ausgeben
+      debug:
+        msg:
+          - "SSH-Hardening abgeschlossen."
+          - "Benutzer: {{ ssh_user }}"
+          - "Root-Login: deaktiviert"
+          - "SSH-Key wurde eingetragen."
+          - "Passwort-Login für '{{ ssh_user }}' aktuell erlaubt (für Notzugriff)."
