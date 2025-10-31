@@ -5,15 +5,20 @@
   gather_facts: true
 
   vars:
+    # SSH-Verbindungsoptionen (erzwingt Passwortauth)
     ansible_ssh_common_args: "-o PreferredAuthentications=password -o PubkeyAuthentication=no"
 
-    ssh_initial_user: "{{ SSH_INITIAL_USER }}"
-    ssh_target_user: "{{ SSH_TARGET_USER }}"
+    # Benutzer- und Kennwort-Definitionen aus dem Schlüsselspeicher
+    ssh_initial_user: root
+    ssh_target_user: juergen
     ssh_public_key: "{{ secrets.SSH_PUBLIC_KEY }}"
+    root_password: "{{ secrets.root_password }}"
     juergen_password: "{{ secrets.juergen_password }}"
-    ansible_user: "{{ SSH_INITIAL_USER }}"
-    ansible_password: "{{ secrets.root_password }}"
-    ansible_become_password: "{{ secrets.root_password }}"
+
+    # Ansible Login-Daten
+    ansible_user: "{{ ssh_initial_user }}"
+    ansible_password: "{{ root_password }}"
+    ansible_become_password: "{{ root_password }}"
 
   tasks:
     - name: Starte SSH Hardening
