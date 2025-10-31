@@ -1,92 +1,86 @@
 ---
-- name: SSH-Härtung und Benutzeranlage
+- name: SSH Hardening und Benutzeranlage
   hosts: LinuxUbuntu
   become: true
   become_method: sudo
 
   vars:
-    ssh_user: "{{ SSH_USER | default('juergen') }}"
-    ssh_password_plain: "{{ SSH_PASSWORD | default(omit) }}"
-    ssh_public_key: "{{ SSH_PUBLIC_KEY | default('') }}"
-    disable_password_auth: "{{ (ssh_public_key | length > 0) | bool }}"
+    juergen_user: juergen
+    juergen_group: juergen
+    sudoers_file: "/etc/sudoers.d/90-juergen"
+    sshd_config_path: "/etc/ssh/sshd_config"
 
   tasks:
-    - name: Stelle sicher, dass sudo installiert ist
-      ansible.builtin.apt:
+
+    - name: Stelle sicher, dass das Paket sudo vorhanden ist
+      apt:
         name: sudo
         state: present
-        update_cache: false
+        update_cache: yes
 
-    - name: Benutzer anlegen mit Passwort und Home-Verzeichnis
-      ansible.builtin.user:
-        name: "{{ ssh_user }}"
-        comment: "Administrativer Benutzer"
+    - name: Benutzer "{{ juergen_user }}" anlegen
+      user:
+        name: "{{ juergen_user }}"
+        password: "{{ juergen_password | password_hash('sha512') }}"
         shell: /bin/bash
-        create_home: true
-        password: "{{ (ssh_password_plain | password_hash('sha512')) if ssh_password_plain is defined else omit }}"
+        create_home: yes
         groups: sudo
-        append: true
+        append: yes
 
-    - name: .ssh-Verzeichnis erstellen (falls Key vorhanden)
-      ansible.builtin.file:
-        path: "/home/{{ ssh_user }}/.ssh"
+    - name: Authorized_keys Verzeichnis anlegen
+      file:
+        path: "/home/{{ juergen_user }}/.ssh"
         state: directory
-        owner: "{{ ssh_user }}"
-        group: "{{ ssh_user }}"
+        owner: "{{ juergen_user }}"
+        group: "{{ juergen_group }}"
         mode: '0700'
-      when: ssh_public_key | length > 0
 
-    - name: SSH-Key hinterlegen
-      ansible.builtin.authorized_key:
-        user: "{{ ssh_user }}"
-        state: present
-        key: "{{ ssh_public_key }}"
-        manage_dir: false
-      when: ssh_public_key | length > 0
+    - name: SSH Public Key hinterlegen
+      copy:
+        dest: "/home/{{ juergen_user }}/.ssh/authorized_keys"
+        content: "{{ SSH_PUBLIC_KEY }}"
+        owner: "{{ juergen_user }}"
+        group: "{{ juergen_group }}"
+        mode: '0600'
 
-    - name: Sudo-Rechte einrichten
-      ansible.builtin.copy:
-        dest: "/etc/sudoers.d/{{ ssh_user }}"
-        content: "{{ ssh_user }} ALL=(ALL) NOPASSWD:ALL"
+    - name: Sudo-Rechte für juergen hinzufügen (ohne Passwort)
+      copy:
+        dest: "{{ sudoers_file }}"
+        content: "{{ juergen_user }} ALL=(ALL) NOPASSWD:ALL"
         owner: root
         group: root
         mode: '0440'
-        validate: 'visudo -cf %s'
 
-    - name: Root-Login deaktivieren
-      ansible.builtin.lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: '^[#\s]*PermitRootLogin\s+.*'
+    - name: Root-Login und Passwort-Authentifizierung deaktivieren
+      lineinfile:
+        path: "{{ sshd_config_path }}"
+        regexp: '^#?PermitRootLogin'
         line: 'PermitRootLogin no'
-        create: no
-        backrefs: false
+        state: present
+        backrefs: yes
 
-    - name: Passwort-Login deaktivieren (wenn Key vorhanden)
-      ansible.builtin.lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: '^[#\s]*PasswordAuthentication\s+.*'
+    - name: Passwort-Authentifizierung deaktivieren
+      lineinfile:
+        path: "{{ sshd_config_path }}"
+        regexp: '^#?PasswordAuthentication'
         line: 'PasswordAuthentication no'
-        create: no
-        backrefs: false
-      when: disable_password_auth | bool
-
-    - name: PubkeyAuthentication aktivieren
-      ansible.builtin.lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: '^[#\s]*PubkeyAuthentication\s+.*'
-        line: 'PubkeyAuthentication yes'
-        create: no
-        backrefs: false
+        state: present
+        backrefs: yes
 
     - name: SSH-Dienst neu starten
-      ansible.builtin.service:
+      service:
         name: ssh
         state: restarted
 
-    - name: Zusammenfassung ausgeben
-      ansible.builtin.debug:
+    - name: Prüfen, ob SSH-Dienst aktiv ist
+      shell: systemctl is-active ssh
+      register: ssh_status
+      changed_when: false
+
+    - name: Ergebnis anzeigen
+      debug:
         msg:
-          - "✅ Benutzer '{{ ssh_user }}' wurde angelegt oder aktualisiert."
-          - "🔑 SSH-Key: {{ 'hinterlegt' if (ssh_public_key | length > 0) else 'nicht gesetzt' }}"
-          - "🚫 Root-Login: deaktiviert."
-          - "🔒 PasswordAuthentication: {{ 'no' if (disable_password_auth | bool) else 'unverändert/erlaubt' }}"
+          - "SSH Hardening abgeschlossen."
+          - "Benutzer '{{ juergen_user }}' wurde angelegt und mit SSH-Key versehen."
+          - "Root-Login ist deaktiviert."
+          - "SSH-Dienststatus: {{ ssh_status.stdout }}"
