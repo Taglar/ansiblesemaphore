@@ -4,46 +4,55 @@
   become: true
   gather_facts: true
 
+  # Erzwinge Passwortauth für die erste Verbindung
   vars:
-    # SSH-Verbindungsoptionen (erzwingt Passwortauth)
     ansible_ssh_common_args: "-o PreferredAuthentications=password -o PubkeyAuthentication=no"
 
-    # Benutzer- und Kennwort-Definitionen aus dem Schlüsselspeicher
-    ssh_initial_user: root
-    ssh_target_user: juergen
-    ssh_public_key: "{{ secrets.SSH_PUBLIC_KEY }}"
-    root_password: "{{ secrets.root_password }}"
-    juergen_password: "{{ secrets.juergen_password }}"
+    # Verbindungs-/Benutzerdaten ausschließlich aus Semaphore-Variablen & -Secrets
+    ansible_user: "{{ SSH_INITIAL_USER }}"
+    ansible_password: "{{ secrets.root_password }}"
+    ansible_become_password: "{{ secrets.root_password }}"
 
-    # Ansible Login-Daten
-    ansible_user: "{{ ssh_initial_user }}"
-    ansible_password: "{{ root_password }}"
-    ansible_become_password: "{{ root_password }}"
+    ssh_target_user: "{{ SSH_TARGET_USER }}"
+    ssh_public_key: "{{ secrets.SSH_PUBLIC_KEY }}"
+    # Generischer Ziel-Password-Name; fallback auf altes 'juergen_password', falls noch genutzt
+    ssh_target_password: "{{ secrets.SSH_TARGET_PASSWORD | default(secrets.juergen_password) }}"
 
   tasks:
-    - name: Starte SSH Hardening
+    # Sicherheitsnetz: brich ab, wenn Pflichtwerte fehlen
+    - name: Preflight – prüfe erforderliche Variablen/Secrets
+      assert:
+        that:
+          - SSH_INITIAL_USER is defined
+          - SSH_TARGET_USER is defined
+          - secrets.root_password is defined
+          - secrets.SSH_PUBLIC_KEY is defined
+          - (secrets.SSH_TARGET_PASSWORD is defined) or (secrets.juergen_password is defined)
+        fail_msg: "Pflichtvariablen/Secrets fehlen (SSH_INITIAL_USER, SSH_TARGET_USER, root_password, SSH_PUBLIC_KEY, SSH_TARGET_PASSWORD|juergen_password)."
+
+    - name: Info
       debug:
         msg:
-          - "Verbinde als Benutzer: {{ ssh_initial_user }}"
+          - "Verbinde als: {{ ansible_user }}"
           - "Zielbenutzer: {{ ssh_target_user }}"
-          - "SSH-Hardening wird gestartet..."
 
-    - name: Stelle sicher, dass das Paket 'sudo' installiert ist
+    - name: Stelle sicher, dass 'sudo' installiert ist (Debian/Ubuntu)
       apt:
         name: sudo
         state: present
+        update_cache: false
       when: ansible_os_family == "Debian"
 
-    - name: Lege Benutzer {{ ssh_target_user }} an (falls nicht vorhanden)
+    - name: Benutzer {{ ssh_target_user }} anlegen/aktualisieren
       user:
         name: "{{ ssh_target_user }}"
-        password: "{{ juergen_password | password_hash('sha512') }}"
+        password: "{{ ssh_target_password | password_hash('sha512') }}"
         shell: /bin/bash
-        create_home: yes
+        create_home: true
         groups: sudo
-        append: yes
+        append: true
 
-    - name: Erstelle .ssh-Verzeichnis für {{ ssh_target_user }}
+    - name: .ssh-Verzeichnis anlegen
       file:
         path: "/home/{{ ssh_target_user }}/.ssh"
         state: directory
@@ -51,7 +60,7 @@
         group: "{{ ssh_target_user }}"
         mode: '0700'
 
-    - name: Trage öffentlichen SSH-Key ein
+    - name: SSH Public Key hinterlegen
       copy:
         content: "{{ ssh_public_key }}"
         dest: "/home/{{ ssh_target_user }}/.ssh/authorized_keys"
@@ -64,24 +73,25 @@
         path: /etc/ssh/sshd_config
         regexp: '^#?PermitRootLogin'
         line: 'PermitRootLogin no'
-        create: yes
+        create: true
+        backup: true
       notify: Restart SSH
 
-    - name: Passwort-Login für root deaktivieren
+    - name: Passwort-Login global erlauben (für Nicht-Root; Key-Auth bleibt aktiv)
       lineinfile:
         path: /etc/ssh/sshd_config
         regexp: '^#?PasswordAuthentication'
-        line: 'PasswordAuthentication no'
-        create: yes
+        line: 'PasswordAuthentication yes'
+        create: true
+        backup: true
       notify: Restart SSH
 
-    - name: Zusammenfassung anzeigen
+    - name: Zusammenfassung
       debug:
         msg:
-          - "✅ Benutzer '{{ ssh_target_user }}' erfolgreich erstellt"
-          - "✅ SSH-Key installiert"
-          - "✅ Root-Login deaktiviert"
-          - "🚀 SSH-Hardening abgeschlossen"
+          - "✅ Benutzer '{{ ssh_target_user }}' vorhanden & in sudo"
+          - "✅ Public Key hinterlegt"
+          - "✅ Root SSH-Login deaktiviert"
 
   handlers:
     - name: Restart SSH
