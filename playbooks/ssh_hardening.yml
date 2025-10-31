@@ -1,85 +1,85 @@
 ---
-- name: SSH Hardening
+- name: SSH Hardening & Benutzeranlage
   hosts: Ohne_SSH_Key
   become: true
-  become_method: sudo
   gather_facts: yes
 
   vars:
-    ansible_password: "{{ secrets.root_password }}"
-    ssh_user: "{{ SSH_USER }}"
-    ssh_public_key: "{{ secrets.SSH_PUBLIC_KEY }}"
-    juergen_password: "{{ secrets.juergen_password }}"
+    ssh_initial_user: "{{ SSH_INITIAL_USER }}"         # z. B. root
+    ssh_target_user: "{{ SSH_TARGET_USER }}"           # z. B. juergen
+    ssh_pubkey: "{{ secrets.SSH_PUBLIC_KEY }}"         # öffentlicher SSH-Key
+    ssh_target_password: "{{ secrets.juergen_password }}" # Passwort für neuen Benutzer
 
   tasks:
-    - name: Benutzer "{{ ssh_user }}" anlegen
-      user:
-        name: "{{ ssh_user }}"
-        password: "{{ juergen_password | password_hash('sha512') }}"
-        shell: /bin/bash
-        state: present
-        create_home: yes
 
-    - name: Benutzer "{{ ssh_user }}" zu sudo-Gruppe hinzufügen
+    - name: Sicherstellen, dass Python installiert ist (für Ansible)
+      raw: |
+        which python3 || (apt-get update -y && apt-get install -y python3)
+      changed_when: false
+
+    - name: Benutzer {{ ssh_target_user }} anlegen
       user:
-        name: "{{ ssh_user }}"
+        name: "{{ ssh_target_user }}"
+        password: "{{ ssh_target_password | password_hash('sha512') }}"
+        shell: /bin/bash
+        create_home: yes
+        state: present
+
+    - name: Benutzer {{ ssh_target_user }} zu sudo hinzufügen
+      user:
+        name: "{{ ssh_target_user }}"
         groups: sudo
         append: yes
 
-    - name: SSH-Verzeichnis für Benutzer erstellen
+    - name: SSH-Verzeichnis für {{ ssh_target_user }} erstellen
       file:
-        path: "/home/{{ ssh_user }}/.ssh"
+        path: "/home/{{ ssh_target_user }}/.ssh"
         state: directory
-        owner: "{{ ssh_user }}"
-        group: "{{ ssh_user }}"
+        owner: "{{ ssh_target_user }}"
+        group: "{{ ssh_target_user }}"
         mode: '0700'
 
-    - name: SSH Public Key hinzufügen
+    - name: Public-Key hinterlegen
       copy:
-        content: "{{ ssh_public_key }}"
-        dest: "/home/{{ ssh_user }}/.ssh/authorized_keys"
-        owner: "{{ ssh_user }}"
-        group: "{{ ssh_user }}"
+        dest: "/home/{{ ssh_target_user }}/.ssh/authorized_keys"
+        content: "{{ ssh_pubkey }}"
+        owner: "{{ ssh_target_user }}"
+        group: "{{ ssh_target_user }}"
         mode: '0600'
 
-    - name: Sicherstellen, dass Passwort-Login erlaubt ist (nur temporär für juergen)
-      lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: '^#?PasswordAuthentication'
-        line: 'PasswordAuthentication yes'
-        state: present
+    - name: Sudo ohne Passwort für {{ ssh_target_user }} erlauben
+      copy:
+        dest: "/etc/sudoers.d/{{ ssh_target_user }}"
+        content: "{{ ssh_target_user }} ALL=(ALL) NOPASSWD:ALL"
+        owner: root
+        group: root
+        mode: '0440'
 
-    - name: Root-Login per SSH deaktivieren
+    - name: Root-Login via SSH deaktivieren
       lineinfile:
         path: /etc/ssh/sshd_config
-        regexp: '^#?PermitRootLogin'
+        regexp: '^PermitRootLogin'
         line: 'PermitRootLogin no'
-        state: present
+        create: no
+        backup: yes
 
-    - name: PubkeyAuthentication aktivieren
+    - name: Passwort-Login für alle Benutzer erlauben (nur für Debug, optional)
       lineinfile:
         path: /etc/ssh/sshd_config
-        regexp: '^#?PubkeyAuthentication'
-        line: 'PubkeyAuthentication yes'
-        state: present
-
-    - name: ChallengeResponseAuthentication deaktivieren
-      lineinfile:
-        path: /etc/ssh/sshd_config
-        regexp: '^#?ChallengeResponseAuthentication'
-        line: 'ChallengeResponseAuthentication no'
-        state: present
+        regexp: '^PasswordAuthentication'
+        line: 'PasswordAuthentication yes'
+        create: no
+        backup: yes
 
     - name: SSH-Dienst neu starten
       service:
         name: ssh
         state: restarted
 
-    - name: Zusammenfassung ausgeben
+    - name: Zusammenfassung anzeigen
       debug:
         msg:
-          - "SSH-Hardening abgeschlossen."
-          - "Benutzer: {{ ssh_user }}"
-          - "Root-Login: deaktiviert"
-          - "SSH-Key wurde eingetragen."
-          - "Passwort-Login für '{{ ssh_user }}' aktuell erlaubt (für Notzugriff)."
+          - "✅ SSH-Hardening abgeschlossen auf {{ inventory_hostname }}"
+          - "👤 Benutzer '{{ ssh_target_user }}' wurde angelegt."
+          - "🔒 Root-Login via SSH ist nun deaktiviert."
+          - "🗝️ Öffentlicher Key wurde unter /home/{{ ssh_target_user }}/.ssh/authorized_keys hinterlegt."
