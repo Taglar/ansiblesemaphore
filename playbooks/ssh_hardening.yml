@@ -1,81 +1,92 @@
 ---
-- name: SSH-Härtung & Benutzerverwaltung
+- name: SSH-Härtung und Benutzeranlage
   hosts: LinuxUbuntu
   become: true
   become_method: sudo
 
   vars:
-    # Werte aus Semaphore oder Ansible Vault (nicht in Git!)
-    ssh_user: "{{ lookup('ansible.builtin.env', 'SSH_USER') | default('juergen') }}"
-    ssh_public_key: "{{ lookup('ansible.builtin.env', 'SSH_PUBLIC_KEY') }}"
-    user_password_plain: "{{ lookup('ansible.builtin.env', 'SSH_PASSWORD') }}"
+    ssh_user: "{{ SSH_USER | default('juergen') }}"
+    ssh_password_plain: "{{ SSH_PASSWORD | default(omit) }}"
+    ssh_public_key: "{{ SSH_PUBLIC_KEY | default('') }}"
+    disable_password_auth: "{{ (ssh_public_key | length > 0) | bool }}"
 
   tasks:
-    - name: Stelle sicher, dass Paket "sudo" installiert ist
+    - name: Stelle sicher, dass sudo installiert ist
       ansible.builtin.apt:
         name: sudo
         state: present
         update_cache: false
 
-    - name: Benutzer juergen anlegen (mit Passwort & Home)
+    - name: Benutzer anlegen mit Passwort und Home-Verzeichnis
       ansible.builtin.user:
         name: "{{ ssh_user }}"
-        comment: "Administrative Benutzerkonto für SSH"
+        comment: "Administrativer Benutzer"
         shell: /bin/bash
         create_home: true
-        password: "{{ user_password_plain | password_hash('sha512') }}"
+        password: "{{ (ssh_password_plain | password_hash('sha512')) if ssh_password_plain is defined else omit }}"
         groups: sudo
         append: true
 
-    - name: Erstelle .ssh-Verzeichnis
+    - name: .ssh-Verzeichnis erstellen (falls Key vorhanden)
       ansible.builtin.file:
         path: "/home/{{ ssh_user }}/.ssh"
         state: directory
         owner: "{{ ssh_user }}"
         group: "{{ ssh_user }}"
         mode: '0700'
+      when: ssh_public_key | length > 0
 
-    - name: SSH-Public-Key hinterlegen
+    - name: SSH-Key hinterlegen
       ansible.builtin.authorized_key:
         user: "{{ ssh_user }}"
         state: present
         key: "{{ ssh_public_key }}"
-      when: ssh_public_key is defined and ssh_public_key | length > 0
+        manage_dir: false
+      when: ssh_public_key | length > 0
 
-    - name: Sudo-Rechte sicherstellen
+    - name: Sudo-Rechte einrichten
       ansible.builtin.copy:
         dest: "/etc/sudoers.d/{{ ssh_user }}"
         content: "{{ ssh_user }} ALL=(ALL) NOPASSWD:ALL"
         owner: root
         group: root
         mode: '0440'
+        validate: 'visudo -cf %s'
 
-    - name: Root-Login über SSH deaktivieren
+    - name: Root-Login deaktivieren
       ansible.builtin.lineinfile:
         path: /etc/ssh/sshd_config
-        regexp: '^PermitRootLogin'
+        regexp: '^[#\s]*PermitRootLogin\s+.*'
         line: 'PermitRootLogin no'
         create: no
-        backrefs: no
+        backrefs: false
 
-    - name: Passwort-Login deaktivieren (optional, falls nur SSH erlaubt sein soll)
+    - name: Passwort-Login deaktivieren (wenn Key vorhanden)
       ansible.builtin.lineinfile:
         path: /etc/ssh/sshd_config
-        regexp: '^PasswordAuthentication'
+        regexp: '^[#\s]*PasswordAuthentication\s+.*'
         line: 'PasswordAuthentication no'
         create: no
-        backrefs: no
-      when: ssh_public_key is defined and ssh_public_key | length > 0
+        backrefs: false
+      when: disable_password_auth | bool
+
+    - name: PubkeyAuthentication aktivieren
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^[#\s]*PubkeyAuthentication\s+.*'
+        line: 'PubkeyAuthentication yes'
+        create: no
+        backrefs: false
 
     - name: SSH-Dienst neu starten
       ansible.builtin.service:
         name: ssh
         state: restarted
 
-    - name: Zusammenfassung
+    - name: Zusammenfassung ausgeben
       ansible.builtin.debug:
         msg:
-          - "✅ Benutzer '{{ ssh_user }}' wurde angelegt und zu 'sudo' hinzugefügt."
-          - "🔑 SSH-Key wurde hinterlegt."
-          - "🚫 Root-Login über SSH wurde deaktiviert."
-          - "📋 Passwort-Login: {{ 'deaktiviert' if ssh_public_key is defined else 'erlaubt' }}"
+          - "✅ Benutzer '{{ ssh_user }}' wurde angelegt oder aktualisiert."
+          - "🔑 SSH-Key: {{ 'hinterlegt' if (ssh_public_key | length > 0) else 'nicht gesetzt' }}"
+          - "🚫 Root-Login: deaktiviert."
+          - "🔒 PasswordAuthentication: {{ 'no' if (disable_password_auth | bool) else 'unverändert/erlaubt' }}"
