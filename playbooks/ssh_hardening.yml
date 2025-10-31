@@ -5,19 +5,18 @@
   gather_facts: yes
 
   vars:
-    ssh_initial_user: "{{ SSH_INITIAL_USER }}"         # z. B. root
-    ssh_target_user: "{{ SSH_TARGET_USER }}"           # z. B. juergen
-    ssh_pubkey: "{{ secrets.SSH_PUBLIC_KEY }}"         # öffentlicher SSH-Key
-    ssh_target_password: "{{ secrets.juergen_password }}" # Passwort für neuen Benutzer
+    # Ziel-Benutzername NICHT hardcoden — kommt aus Variablen/Secrets in Semaphore:
+    ssh_target_user: "{{ SSH_USER }}"
+    ssh_pubkey: "{{ secrets.SSH_PUBLIC_KEY }}"
+    ssh_target_password: "{{ secrets.juergen_password }}"
 
   tasks:
-
-    - name: Sicherstellen, dass Python installiert ist (für Ansible)
+    - name: (Bootstrap) Stelle sicher, dass python3 vorhanden ist (für Ansible)
       raw: |
-        which python3 || (apt-get update -y && apt-get install -y python3)
+        command -v python3 >/dev/null 2>&1 || (apt-get update -y && apt-get install -y python3)
       changed_when: false
 
-    - name: Benutzer {{ ssh_target_user }} anlegen
+    - name: Benutzer {{ ssh_target_user }} anlegen (mit Passwort, Shell, Home)
       user:
         name: "{{ ssh_target_user }}"
         password: "{{ ssh_target_password | password_hash('sha512') }}"
@@ -25,13 +24,13 @@
         create_home: yes
         state: present
 
-    - name: Benutzer {{ ssh_target_user }} zu sudo hinzufügen
+    - name: {{ ssh_target_user }} zur sudo-Gruppe hinzufügen
       user:
         name: "{{ ssh_target_user }}"
         groups: sudo
         append: yes
 
-    - name: SSH-Verzeichnis für {{ ssh_target_user }} erstellen
+    - name: ~/.ssh Verzeichnis erstellen
       file:
         path: "/home/{{ ssh_target_user }}/.ssh"
         state: directory
@@ -39,10 +38,10 @@
         group: "{{ ssh_target_user }}"
         mode: '0700'
 
-    - name: Public-Key hinterlegen
+    - name: Public Key in authorized_keys schreiben
       copy:
-        dest: "/home/{{ ssh_target_user }}/.ssh/authorized_keys"
         content: "{{ ssh_pubkey }}"
+        dest: "/home/{{ ssh_target_user }}/.ssh/authorized_keys"
         owner: "{{ ssh_target_user }}"
         group: "{{ ssh_target_user }}"
         mode: '0600'
@@ -55,31 +54,40 @@
         group: root
         mode: '0440'
 
+    # SSH-Hardening
     - name: Root-Login via SSH deaktivieren
       lineinfile:
         path: /etc/ssh/sshd_config
-        regexp: '^PermitRootLogin'
+        regexp: '^#?\s*PermitRootLogin'
         line: 'PermitRootLogin no'
-        create: no
+        state: present
         backup: yes
 
-    - name: Passwort-Login für alle Benutzer erlauben (nur für Debug, optional)
+    - name: PubkeyAuthentication aktivieren
       lineinfile:
         path: /etc/ssh/sshd_config
-        regexp: '^PasswordAuthentication'
+        regexp: '^#?\s*PubkeyAuthentication'
+        line: 'PubkeyAuthentication yes'
+        state: present
+
+    # Optional: vorerst Passwort-Login erlauben (für Notzugang), später wieder deaktivieren
+    - name: PasswordAuthentication (temporär) aktivieren
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?\s*PasswordAuthentication'
         line: 'PasswordAuthentication yes'
-        create: no
-        backup: yes
+        state: present
 
     - name: SSH-Dienst neu starten
       service:
         name: ssh
         state: restarted
 
-    - name: Zusammenfassung anzeigen
+    - name: Zusammenfassung
       debug:
         msg:
           - "✅ SSH-Hardening abgeschlossen auf {{ inventory_hostname }}"
-          - "👤 Benutzer '{{ ssh_target_user }}' wurde angelegt."
-          - "🔒 Root-Login via SSH ist nun deaktiviert."
-          - "🗝️ Öffentlicher Key wurde unter /home/{{ ssh_target_user }}/.ssh/authorized_keys hinterlegt."
+          - "👤 Benutzer '{{ ssh_target_user }}' wurde angelegt (sudo, NOPASSWD)."
+          - "🗝️ Key in /home/{{ ssh_target_user }}/.ssh/authorized_keys"
+          - "🔒 Root-Login via SSH: deaktiviert"
+          - "🔧 PasswordAuthentication: YES (temporär; kann später wieder auf NO)"
