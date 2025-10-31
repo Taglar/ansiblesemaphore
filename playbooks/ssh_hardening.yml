@@ -1,12 +1,12 @@
 ---
 - name: SSH Hardening & Benutzeranlage
   hosts: Ohne_SSH_Key
-    vars:
-    ansible_ssh_common_args: "-o PreferredAuthentications=password -o PubkeyAuthentication=no"
   become: true
   gather_facts: true
 
   vars:
+    ansible_ssh_common_args: "-o PreferredAuthentications=password -o PubkeyAuthentication=no"
+
     ssh_initial_user: "{{ SSH_INITIAL_USER }}"
     ssh_target_user: "{{ SSH_TARGET_USER }}"
     ssh_public_key: "{{ secrets.SSH_PUBLIC_KEY }}"
