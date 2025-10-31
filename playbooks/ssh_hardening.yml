@@ -1,6 +1,8 @@
 ---
 - name: SSH Hardening & Benutzeranlage
   hosts: Ohne_SSH_Key
+    vars:
+    ansible_ssh_common_args: "-o PreferredAuthentications=password -o PubkeyAuthentication=no"
   become: true
   gather_facts: true
 
