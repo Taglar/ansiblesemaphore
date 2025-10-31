@@ -1,0 +1,81 @@
+---
+- name: SSH-Härtung & Benutzerverwaltung
+  hosts: LinuxUbuntu
+  become: true
+  become_method: sudo
+
+  vars:
+    # Werte aus Semaphore oder Ansible Vault (nicht in Git!)
+    ssh_user: "{{ lookup('ansible.builtin.env', 'SSH_USER') | default('juergen') }}"
+    ssh_public_key: "{{ lookup('ansible.builtin.env', 'SSH_PUBLIC_KEY') }}"
+    user_password_plain: "{{ lookup('ansible.builtin.env', 'SSH_PASSWORD') }}"
+
+  tasks:
+    - name: Stelle sicher, dass Paket "sudo" installiert ist
+      ansible.builtin.apt:
+        name: sudo
+        state: present
+        update_cache: false
+
+    - name: Benutzer juergen anlegen (mit Passwort & Home)
+      ansible.builtin.user:
+        name: "{{ ssh_user }}"
+        comment: "Administrative Benutzerkonto für SSH"
+        shell: /bin/bash
+        create_home: true
+        password: "{{ user_password_plain | password_hash('sha512') }}"
+        groups: sudo
+        append: true
+
+    - name: Erstelle .ssh-Verzeichnis
+      ansible.builtin.file:
+        path: "/home/{{ ssh_user }}/.ssh"
+        state: directory
+        owner: "{{ ssh_user }}"
+        group: "{{ ssh_user }}"
+        mode: '0700'
+
+    - name: SSH-Public-Key hinterlegen
+      ansible.builtin.authorized_key:
+        user: "{{ ssh_user }}"
+        state: present
+        key: "{{ ssh_public_key }}"
+      when: ssh_public_key is defined and ssh_public_key | length > 0
+
+    - name: Sudo-Rechte sicherstellen
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/{{ ssh_user }}"
+        content: "{{ ssh_user }} ALL=(ALL) NOPASSWD:ALL"
+        owner: root
+        group: root
+        mode: '0440'
+
+    - name: Root-Login über SSH deaktivieren
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^PermitRootLogin'
+        line: 'PermitRootLogin no'
+        create: no
+        backrefs: no
+
+    - name: Passwort-Login deaktivieren (optional, falls nur SSH erlaubt sein soll)
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^PasswordAuthentication'
+        line: 'PasswordAuthentication no'
+        create: no
+        backrefs: no
+      when: ssh_public_key is defined and ssh_public_key | length > 0
+
+    - name: SSH-Dienst neu starten
+      ansible.builtin.service:
+        name: ssh
+        state: restarted
+
+    - name: Zusammenfassung
+      ansible.builtin.debug:
+        msg:
+          - "✅ Benutzer '{{ ssh_user }}' wurde angelegt und zu 'sudo' hinzugefügt."
+          - "🔑 SSH-Key wurde hinterlegt."
+          - "🚫 Root-Login über SSH wurde deaktiviert."
+          - "📋 Passwort-Login: {{ 'deaktiviert' if ssh_public_key is defined else 'erlaubt' }}"
