@@ -5,33 +5,33 @@
   gather_facts: yes
 
   vars:
-    # Ziel-Benutzername NICHT hardcoden — kommt aus Variablen/Secrets in Semaphore:
-    ssh_target_user: "{{ SSH_USER }}"
+    ssh_initial_user: "{{ SSH_INITIAL_USER | default('root') }}"
+    ssh_target_user: "{{ SSH_TARGET_USER }}"
     ssh_pubkey: "{{ secrets.SSH_PUBLIC_KEY }}"
     ssh_target_password: "{{ secrets.juergen_password }}"
 
   tasks:
-    - name: (Bootstrap) Stelle sicher, dass python3 vorhanden ist (für Ansible)
+    - name: Bootstrap – Stelle sicher, dass python3 vorhanden ist (für Ansible)
       raw: |
         command -v python3 >/dev/null 2>&1 || (apt-get update -y && apt-get install -y python3)
       changed_when: false
 
-    - name: Benutzer {{ ssh_target_user }} anlegen (mit Passwort, Shell, Home)
-      user:
+    - name: Benutzer anlegen – {{ ssh_target_user }}
+      ansible.builtin.user:
         name: "{{ ssh_target_user }}"
         password: "{{ ssh_target_password | password_hash('sha512') }}"
         shell: /bin/bash
         create_home: yes
         state: present
 
-    - name: {{ ssh_target_user }} zur sudo-Gruppe hinzufügen
-      user:
+    - name: Sudo-Gruppe hinzufügen für {{ ssh_target_user }}
+      ansible.builtin.user:
         name: "{{ ssh_target_user }}"
         groups: sudo
         append: yes
 
-    - name: ~/.ssh Verzeichnis erstellen
-      file:
+    - name: ~/.ssh Verzeichnis erstellen für {{ ssh_target_user }}
+      ansible.builtin.file:
         path: "/home/{{ ssh_target_user }}/.ssh"
         state: directory
         owner: "{{ ssh_target_user }}"
@@ -39,15 +39,15 @@
         mode: '0700'
 
     - name: Public Key in authorized_keys schreiben
-      copy:
+      ansible.builtin.copy:
         content: "{{ ssh_pubkey }}"
         dest: "/home/{{ ssh_target_user }}/.ssh/authorized_keys"
         owner: "{{ ssh_target_user }}"
         group: "{{ ssh_target_user }}"
         mode: '0600'
 
-    - name: Sudo ohne Passwort für {{ ssh_target_user }} erlauben
-      copy:
+    - name: Sudo ohne Passwort erlauben für {{ ssh_target_user }}
+      ansible.builtin.copy:
         dest: "/etc/sudoers.d/{{ ssh_target_user }}"
         content: "{{ ssh_target_user }} ALL=(ALL) NOPASSWD:ALL"
         owner: root
@@ -56,7 +56,7 @@
 
     # SSH-Hardening
     - name: Root-Login via SSH deaktivieren
-      lineinfile:
+      ansible.builtin.lineinfile:
         path: /etc/ssh/sshd_config
         regexp: '^#?\s*PermitRootLogin'
         line: 'PermitRootLogin no'
@@ -64,30 +64,30 @@
         backup: yes
 
     - name: PubkeyAuthentication aktivieren
-      lineinfile:
+      ansible.builtin.lineinfile:
         path: /etc/ssh/sshd_config
         regexp: '^#?\s*PubkeyAuthentication'
         line: 'PubkeyAuthentication yes'
         state: present
 
-    # Optional: vorerst Passwort-Login erlauben (für Notzugang), später wieder deaktivieren
+    # Optional (vorerst): Passwort-Login für Notzugang erlauben
     - name: PasswordAuthentication (temporär) aktivieren
-      lineinfile:
+      ansible.builtin.lineinfile:
         path: /etc/ssh/sshd_config
         regexp: '^#?\s*PasswordAuthentication'
         line: 'PasswordAuthentication yes'
         state: present
 
     - name: SSH-Dienst neu starten
-      service:
+      ansible.builtin.service:
         name: ssh
         state: restarted
 
     - name: Zusammenfassung
-      debug:
+      ansible.builtin.debug:
         msg:
           - "✅ SSH-Hardening abgeschlossen auf {{ inventory_hostname }}"
-          - "👤 Benutzer '{{ ssh_target_user }}' wurde angelegt (sudo, NOPASSWD)."
+          - "👤 Benutzer '{{ ssh_target_user }}' angelegt (sudo, NOPASSWD)."
           - "🗝️ Key in /home/{{ ssh_target_user }}/.ssh/authorized_keys"
           - "🔒 Root-Login via SSH: deaktiviert"
           - "🔧 PasswordAuthentication: YES (temporär; kann später wieder auf NO)"
