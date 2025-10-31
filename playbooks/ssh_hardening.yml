@@ -80,7 +80,37 @@
     - name: Ergebnis anzeigen
       debug:
         msg:
-          - "SSH Hardening abgeschlossen."
-          - "Benutzer '{{ juergen_user }}' wurde angelegt und mit SSH-Key versehen."
-          - "Root-Login ist deaktiviert."
-          - "SSH-Dienststatus: {{ ssh_status.stdout }}"
+          - "✅ SSH Hardening abgeschlossen."
+          - "👤 Benutzer '{{ juergen_user }}' wurde angelegt und mit SSH-Key versehen."
+          - "🔒 Root-Login ist deaktiviert."
+          - "📡 SSH-Dienststatus: {{ ssh_status.stdout }}"
+
+    # -------------------------------
+    # Sicherheitsprüfung nach Hardening
+    # -------------------------------
+    - name: Warte kurz, bis SSH neu gestartet ist
+      pause:
+        seconds: 5
+
+    - name: Teste SSH-Login mit Benutzer juergen (Key)
+      delegate_to: localhost
+      shell: >
+        ssh -o BatchMode=yes -o ConnectTimeout=5 -i ~/.ssh/id_rsa {{ juergen_user }}@{{ inventory_hostname }} 'echo SSH_Login_OK'
+      register: ssh_juergen_test
+      failed_when: false
+      changed_when: false
+
+    - name: Teste SSH-Login mit Root (sollte fehlschlagen)
+      delegate_to: localhost
+      shell: >
+        ssh -o BatchMode=yes -o ConnectTimeout=5 -i ~/.ssh/id_rsa root@{{ inventory_hostname }} 'echo Root_Login_OK'
+      register: ssh_root_test
+      failed_when: false
+      changed_when: false
+
+    - name: Zusammenfassung der SSH-Tests
+      debug:
+        msg:
+          - "Test Login juergen: {{ '✅ OK' if 'SSH_Login_OK' in ssh_juergen_test.stdout else '❌ FEHLGESCHLAGEN' }}"
+          - "Test Login root: {{ '✅ BLOCKIERT' if ssh_root_test.rc != 0 else '❌ NOCH ZUGÄNGLICH' }}"
+          - "Hinweis: Wenn juergen fehlschlägt, bitte Key oder Firewall prüfen."
