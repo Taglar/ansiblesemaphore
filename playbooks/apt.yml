@@ -19,17 +19,20 @@
       vars:
         ts_command: "date +%Y-%m-%d_%H%M%S"
       set_fact:
-        global_backup_date: "{{ lookup('pipe', ts_command) }}"
+        generated_backup_date: "{{ lookup('pipe', ts_command) }}"
 
-    # ------------------------------------------------------------
-    # Globalen Zeitstempel an alle Hosts verteilen
-    # ------------------------------------------------------------
-    - name: Setze globalen Zeitstempel für alle Hosts
+    - name: Globalen Zeitstempel an alle Hosts weitergeben
+      run_once: true
+      add_host:
+        name: "global_vars_holder"
+        backup_date: "{{ generated_backup_date }}"
+
+    - name: Hole globalen Zeitstempel aus global_vars_holder
       set_fact:
-        backup_date: "{{ global_backup_date }}"
-        backup_dir: "{{ backup_root }}/apt_config_{{ global_backup_date }}"
-        diff_log: "{{ backup_root }}/apt_config_{{ global_backup_date }}/apt_diff.log"
-        new_files_log: "{{ backup_root }}/apt_config_{{ global_backup_date }}/new_config_files.log"
+        backup_date: "{{ hostvars['global_vars_holder'].backup_date }}"
+        backup_dir: "{{ backup_root }}/apt_config_{{ hostvars['global_vars_holder'].backup_date }}"
+        diff_log: "{{ backup_root }}/apt_config_{{ hostvars['global_vars_holder'].backup_date }}/apt_diff.log"
+        new_files_log: "{{ backup_root }}/apt_config_{{ hostvars['global_vars_holder'].backup_date }}/new_config_files.log"
 
   tasks:
 
@@ -91,11 +94,6 @@
         update_cache: yes
       register: update_result
 
-    - name: APT-Update-Ergebnis anzeigen
-      debug:
-        var: update_result.stdout_lines
-      when: update_result is defined
-
     - name: Führe APT Upgrade durch (aktualisiere installierte Pakete)
       apt:
         upgrade: dist
@@ -103,10 +101,24 @@
         autoclean: yes
       register: upgrade_result
 
-    - name: APT-Upgrade-Ergebnis anzeigen
-      debug:
-        msg: "{{ upgrade_result.stdout_lines | default(['Keine Änderungen notwendig.']) }}"
-      when: upgrade_result is defined
+    # ------------------------------------------------------------
+    # Kernel-Update und Reboot-Check
+    # ------------------------------------------------------------
+    - name: Prüfe, ob Kernel-Update verfügbar ist
+      shell: |
+        apt list --upgradable 2>/dev/null | grep -E 'linux-image|linux-headers' || true
+      register: kernel_check
+      changed_when: false
+
+    - name: Prüfe, ob Reboot notwendig ist
+      stat:
+        path: /var/run/reboot-required
+      register: reboot_check
+
+    - name: Setze Statusfakten für Kernel/Reboot
+      set_fact:
+        kernel_update_available: "{{ kernel_check.stdout != '' }}"
+        reboot_required: "{{ reboot_check.stat.exists | default(false) }}"
 
     # ------------------------------------------------------------
     # Neue oder geänderte Konfigurationsdateien sichern
@@ -142,9 +154,6 @@
         - item.stat.exists is defined
         - item.stat.exists
 
-    # ------------------------------------------------------------
-    # Sicherstellen, dass Log-Verzeichnis vorhanden ist
-    # ------------------------------------------------------------
     - name: Stelle sicher, dass Backup-Verzeichnis existiert (Failsafe)
       file:
         path: "{{ backup_dir }}"
@@ -161,4 +170,6 @@
           - "✅ Installierte Pakete aktualisiert"
           - "✅ Alte Pakete entfernt und System bereinigt"
           - "✅ Backups und Logs gespeichert unter: {{ backup_dir }}"
+          - "{{ '♻️  Neustart erforderlich' if reboot_required else 'ℹ️  Kein Neustart nötig' }}"
+          - "{{ '🧩 Kernel-Update verfügbar' if kernel_update_available else '✅ Kernel aktuell' }}"
           - "🚀 APT-Update & Upgrade abgeschlossen"
