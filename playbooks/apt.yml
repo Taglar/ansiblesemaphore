@@ -10,18 +10,26 @@
     backup_root: "/var/backups"
 
   pre_tasks:
+    # ------------------------------------------------------------
+    # Einmaligen globalen Zeitstempel erzeugen (nur einmal, lokal)
+    # ------------------------------------------------------------
     - name: Generiere globalen Zeitstempel
-      delegate_to: localhost
       run_once: true
+      delegate_to: localhost
+      vars:
+        ts_command: "date +%Y-%m-%d_%H%M%S"
       set_fact:
-        global_backup_date: "{{ lookup('pipe', 'date +%Y-%m-%d_%H%M%S') }}"
+        global_backup_date: "{{ lookup('pipe', ts_command) }}"
 
-    - name: Verteile globalen Zeitstempel an alle Hosts
+    # ------------------------------------------------------------
+    # Globalen Zeitstempel an alle Hosts verteilen
+    # ------------------------------------------------------------
+    - name: Setze globalen Zeitstempel für alle Hosts
       set_fact:
-        backup_date: "{{ hostvars['localhost'].global_backup_date }}"
-        backup_dir: "{{ backup_root }}/apt_config_{{ hostvars['localhost'].global_backup_date }}"
-        diff_log: "{{ backup_root }}/apt_config_{{ hostvars['localhost'].global_backup_date }}/apt_diff.log"
-        new_files_log: "{{ backup_root }}/apt_config_{{ hostvars['localhost'].global_backup_date }}/new_config_files.log"
+        backup_date: "{{ global_backup_date }}"
+        backup_dir: "{{ backup_root }}/apt_config_{{ global_backup_date }}"
+        diff_log: "{{ backup_root }}/apt_config_{{ global_backup_date }}/apt_diff.log"
+        new_files_log: "{{ backup_root }}/apt_config_{{ global_backup_date }}/new_config_files.log"
 
   tasks:
 
@@ -133,6 +141,15 @@
       when:
         - item.stat.exists is defined
         - item.stat.exists
+
+    # ------------------------------------------------------------
+    # Sicherstellen, dass Log-Verzeichnis vorhanden ist
+    # ------------------------------------------------------------
+    - name: Stelle sicher, dass Backup-Verzeichnis existiert (Failsafe)
+      file:
+        path: "{{ backup_dir }}"
+        state: directory
+        mode: '0755'
 
     # ------------------------------------------------------------
     # Zusammenfassung
