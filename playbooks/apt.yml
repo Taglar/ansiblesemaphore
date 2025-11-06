@@ -2,6 +2,8 @@
 - name: APT Update & Upgrade mit Backup und Logging
   hosts: all
   become: true
+  become_method: sudo
+  become_user: root
   gather_facts: true
 
   vars:
@@ -13,6 +15,26 @@
 
   tasks:
 
+    # ------------------------------------------------------------
+    # Prüfen und ggf. Rechte für /var/backups anpassen
+    # ------------------------------------------------------------
+    - name: Prüfe Schreibrechte auf /var/backups
+      stat:
+        path: /var/backups
+      register: backups_stat
+
+    - name: Rechte für /var/backups anpassen (falls nötig)
+      file:
+        path: /var/backups
+        owner: root
+        group: root
+        mode: '0755'
+      when: backups_stat.stat.exists and backups_stat.stat.mode|int != 493
+      become: true
+
+    # ------------------------------------------------------------
+    # Backup- und Log-Verzeichnisse anlegen
+    # ------------------------------------------------------------
     - name: Verzeichnisse für Backups/Logs anlegen
       file:
         path: "{{ item }}"
@@ -22,6 +44,9 @@
         - "{{ backup_dir }}"
         - "/var/log"
 
+    # ------------------------------------------------------------
+    # Header-Dateien anlegen (nur für definierten Host)
+    # ------------------------------------------------------------
     - name: Header für Diff-Log anlegen
       copy:
         dest: "{{ diff_log }}"
@@ -40,6 +65,9 @@
           ==================================
       when: inventory_hostname == '81.169.250.132'
 
+    # ------------------------------------------------------------
+    # Paketquellen und Upgrades
+    # ------------------------------------------------------------
     - name: Paketquellen aktualisieren (apt update)
       apt:
         update_cache: yes
@@ -62,6 +90,9 @@
         msg: "{{ upgrade_result.stdout_lines | default(['Keine Änderungen notwendig.']) }}"
       when: upgrade_result is defined
 
+    # ------------------------------------------------------------
+    # Neue oder geänderte Konfigurationsdateien sichern
+    # ------------------------------------------------------------
     - name: Suche nach neuen oder geänderten Konfigurationsdateien
       find:
         paths: /etc
@@ -93,6 +124,9 @@
         - item.stat.exists is defined
         - item.stat.exists
 
+    # ------------------------------------------------------------
+    # Zusammenfassung
+    # ------------------------------------------------------------
     - name: Zusammenfassung anzeigen
       debug:
         msg:
