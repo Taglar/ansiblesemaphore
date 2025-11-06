@@ -9,23 +9,21 @@
   vars:
     backup_root: "/var/backups"
 
-  tasks:
-
-    # ------------------------------------------------------------
-    # Timestamp und Backup-Variablen initialisieren
-    # ------------------------------------------------------------
-    - name: Generiere einmaligen Zeitstempel für diesen Lauf
-      set_fact:
-        backup_date: "{{ lookup('pipe', 'date +%Y-%m-%d_%H%M%S') }}"
-        backup_dir: "{{ backup_root }}/apt_config_{{ lookup('pipe', 'date +%Y-%m-%d_%H%M%S') }}"
-      run_once: true
+  pre_tasks:
+    - name: Generiere globalen Zeitstempel
       delegate_to: localhost
-
-    - name: Backup-Pfad global setzen
+      run_once: true
       set_fact:
-        backup_dir: "{{ backup_root }}/apt_config_{{ hostvars['localhost'].backup_date }}"
-        diff_log: "{{ backup_root }}/apt_config_{{ hostvars['localhost'].backup_date }}/apt_diff.log"
-        new_files_log: "{{ backup_root }}/apt_config_{{ hostvars['localhost'].backup_date }}/new_config_files.log"
+        global_backup_date: "{{ lookup('pipe', 'date +%Y-%m-%d_%H%M%S') }}"
+
+    - name: Verteile globalen Zeitstempel an alle Hosts
+      set_fact:
+        backup_date: "{{ hostvars['localhost'].global_backup_date }}"
+        backup_dir: "{{ backup_root }}/apt_config_{{ hostvars['localhost'].global_backup_date }}"
+        diff_log: "{{ backup_root }}/apt_config_{{ hostvars['localhost'].global_backup_date }}/apt_diff.log"
+        new_files_log: "{{ backup_root }}/apt_config_{{ hostvars['localhost'].global_backup_date }}/new_config_files.log"
+
+  tasks:
 
     # ------------------------------------------------------------
     # Prüfen und ggf. Rechte für /var/backups anpassen
