@@ -8,12 +8,24 @@
 
   vars:
     backup_root: "/var/backups"
-    backup_date: "{{ lookup('pipe', 'date +%Y-%m-%d_%H%M%S') }}"
-    backup_dir: "{{ backup_root }}/apt_config_{{ backup_date }}"
-    diff_log: "{{ backup_dir }}/apt_diff.log"
-    new_files_log: "{{ backup_dir }}/new_config_files.log"
 
   tasks:
+
+    # ------------------------------------------------------------
+    # Timestamp und Backup-Variablen initialisieren
+    # ------------------------------------------------------------
+    - name: Generiere einmaligen Zeitstempel für diesen Lauf
+      set_fact:
+        backup_date: "{{ lookup('pipe', 'date +%Y-%m-%d_%H%M%S') }}"
+        backup_dir: "{{ backup_root }}/apt_config_{{ lookup('pipe', 'date +%Y-%m-%d_%H%M%S') }}"
+      run_once: true
+      delegate_to: localhost
+
+    - name: Backup-Pfad global setzen
+      set_fact:
+        backup_dir: "{{ backup_root }}/apt_config_{{ hostvars['localhost'].backup_date }}"
+        diff_log: "{{ backup_root }}/apt_config_{{ hostvars['localhost'].backup_date }}/apt_diff.log"
+        new_files_log: "{{ backup_root }}/apt_config_{{ hostvars['localhost'].backup_date }}/new_config_files.log"
 
     # ------------------------------------------------------------
     # Prüfen und ggf. Rechte für /var/backups anpassen
@@ -45,7 +57,7 @@
         - "/var/log"
 
     # ------------------------------------------------------------
-    # Header-Dateien anlegen (nur für definierten Host)
+    # Header-Dateien anlegen (nur auf bestimmtem Host)
     # ------------------------------------------------------------
     - name: Header für Diff-Log anlegen
       copy:
