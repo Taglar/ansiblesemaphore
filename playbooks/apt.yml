@@ -1,6 +1,6 @@
 ---
 - name: APT Update & Upgrade mit Backup und Logging
-  hosts: all
+  hosts: LinuxUbuntu
   become: true
   become_method: sudo
   become_user: root
