@@ -1,175 +1,114 @@
 ---
-- name: APT Update & Upgrade mit Backup und Logging
+- name: APT Update & Upgrade mit Backup und Cleanup
   hosts: LinuxUbuntu
   become: true
-  become_method: sudo
-  become_user: root
   gather_facts: true
 
   vars:
     backup_root: "/var/backups"
 
   pre_tasks:
-    # ------------------------------------------------------------
-    # Einmaligen globalen Zeitstempel erzeugen (nur einmal, lokal)
-    # ------------------------------------------------------------
-    - name: Generiere globalen Zeitstempel
+    - name: Globalen Zeitstempel setzen
       run_once: true
-      delegate_to: localhost
-      vars:
-        ts_command: "date +%Y-%m-%d_%H%M%S"
       set_fact:
-        generated_backup_date: "{{ lookup('pipe', ts_command) }}"
+        backup_date: "{{ ansible_date_time.iso8601_basic_short }}"
 
-    - name: Globalen Zeitstempel an alle Hosts weitergeben
-      run_once: true
-      add_host:
-        name: "global_vars_holder"
-        backup_date: "{{ generated_backup_date }}"
-
-    - name: Hole globalen Zeitstempel aus global_vars_holder
+    - name: Backup-Variablen setzen
       set_fact:
-        backup_date: "{{ hostvars['global_vars_holder'].backup_date }}"
-        backup_dir: "{{ backup_root }}/apt_config_{{ hostvars['global_vars_holder'].backup_date }}"
-        diff_log: "{{ backup_root }}/apt_config_{{ hostvars['global_vars_holder'].backup_date }}/apt_diff.log"
-        new_files_log: "{{ backup_root }}/apt_config_{{ hostvars['global_vars_holder'].backup_date }}/new_config_files.log"
+        backup_dir: "{{ backup_root }}/apt_config_{{ backup_date }}/{{ inventory_hostname }}"
 
   tasks:
 
     # ------------------------------------------------------------
-    # Prüfen und ggf. Rechte für /var/backups anpassen
+    # Backup-Verzeichnis vorbereiten
     # ------------------------------------------------------------
-    - name: Prüfe Schreibrechte auf /var/backups
-      stat:
-        path: /var/backups
-      register: backups_stat
-
-    - name: Rechte für /var/backups anpassen (falls nötig)
+    - name: Stelle sicher, dass /var/backups existiert
       file:
         path: /var/backups
+        state: directory
         owner: root
         group: root
         mode: '0755'
-      when: backups_stat.stat.exists and backups_stat.stat.mode|int != 493
-      become: true
 
-    # ------------------------------------------------------------
-    # Backup- und Log-Verzeichnisse anlegen
-    # ------------------------------------------------------------
-    - name: Verzeichnisse für Backups/Logs anlegen
-      file:
-        path: "{{ item }}"
-        state: directory
-        mode: '0755'
-      loop:
-        - "{{ backup_dir }}"
-        - "/var/log"
-
-    # ------------------------------------------------------------
-    # Header-Dateien anlegen (nur auf bestimmtem Host)
-    # ------------------------------------------------------------
-    - name: Header für Diff-Log anlegen
-      copy:
-        dest: "{{ diff_log }}"
-        content: |
-          === APT Konfigurationsänderungen ===
-          Datum: {{ lookup('pipe', 'date') }}
-          ====================================
-      when: inventory_hostname == '81.169.250.132'
-
-    - name: Header für Liste der neuen Konfigurationsdateien anlegen
-      copy:
-        dest: "{{ new_files_log }}"
-        content: |
-          === Neue Konfigurationsdateien ===
-          Datum: {{ lookup('pipe', 'date') }}
-          ==================================
-      when: inventory_hostname == '81.169.250.132'
-
-    # ------------------------------------------------------------
-    # Paketquellen und Upgrades
-    # ------------------------------------------------------------
-    - name: Paketquellen aktualisieren (apt update)
-      apt:
-        update_cache: yes
-      register: update_result
-
-    - name: Führe APT Upgrade durch (aktualisiere installierte Pakete)
-      apt:
-        upgrade: dist
-        autoremove: yes
-        autoclean: yes
-      register: upgrade_result
-
-    # ------------------------------------------------------------
-    # Kernel-Update und Reboot-Check
-    # ------------------------------------------------------------
-    - name: Prüfe, ob Kernel-Update verfügbar ist
-      shell: |
-        apt list --upgradable 2>/dev/null | grep -E 'linux-image|linux-headers' || true
-      register: kernel_check
-      changed_when: false
-
-    - name: Prüfe, ob Reboot notwendig ist
-      stat:
-        path: /var/run/reboot-required
-      register: reboot_check
-
-    - name: Setze Statusfakten für Kernel/Reboot
-      set_fact:
-        kernel_update_available: "{{ kernel_check.stdout != '' }}"
-        reboot_required: "{{ reboot_check.stat.exists | default(false) }}"
-
-    # ------------------------------------------------------------
-    # Neue oder geänderte Konfigurationsdateien sichern
-    # ------------------------------------------------------------
-    - name: Suche nach neuen oder geänderten Konfigurationsdateien
-      find:
-        paths: /etc
-        patterns: "*.dpkg-dist"
-      register: new_config_files
-
-    - name: Neue Dateien sichern
-      copy:
-        src: "{{ item.path }}"
-        dest: "{{ backup_dir }}/"
-        remote_src: true
-      loop: "{{ new_config_files.files }}"
-      when: new_config_files.matched > 0
-
-    - name: Prüfe, ob Originaldateien existieren
-      stat:
-        path: "{{ item.path | regex_replace('.dpkg-dist$', '') }}"
-      loop: "{{ new_config_files.files }}"
-      register: original_files
-      when: new_config_files.matched > 0
-
-    - name: Originaldateien sichern (falls vorhanden)
-      copy:
-        src: "{{ item.stat.path }}"
-        dest: "{{ backup_dir }}/"
-        remote_src: true
-      loop: "{{ original_files.results }}"
-      when:
-        - item.stat.exists is defined
-        - item.stat.exists
-
-    - name: Stelle sicher, dass Backup-Verzeichnis existiert (Failsafe)
+    - name: Backup-Verzeichnis für Host anlegen
       file:
         path: "{{ backup_dir }}"
         state: directory
         mode: '0755'
 
     # ------------------------------------------------------------
+    # APT Update & Upgrade
+    # ------------------------------------------------------------
+    - name: Paketquellen aktualisieren
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: System upgraden
+      apt:
+        upgrade: dist
+        autoremove: yes
+        autoclean: yes
+
+    # ------------------------------------------------------------
+    # Reboot-Check
+    # ------------------------------------------------------------
+    - name: Prüfe, ob Reboot erforderlich ist
+      stat:
+        path: /var/run/reboot-required
+      register: reboot_check
+
+    - name: Reboot-Status setzen
+      set_fact:
+        reboot_required: "{{ reboot_check.stat.exists | default(false) }}"
+
+    # ------------------------------------------------------------
+    # dpkg-dist Dateien sichern
+    # ------------------------------------------------------------
+    - name: Suche nach .dpkg-dist Dateien
+      find:
+        paths: /etc
+        patterns: "*.dpkg-dist"
+      register: dpkg_dist_files
+
+    - name: .dpkg-dist Dateien sichern
+      copy:
+        src: "{{ item.path }}"
+        dest: "{{ backup_dir }}/"
+        remote_src: true
+      loop: "{{ dpkg_dist_files.files }}"
+      when: dpkg_dist_files.matched > 0
+
+    - name: Originaldateien sichern (falls vorhanden)
+      copy:
+        src: "{{ item.path | regex_replace('\\.dpkg-dist$', '') }}"
+        dest: "{{ backup_dir }}/"
+        remote_src: true
+      loop: "{{ dpkg_dist_files.files }}"
+      when:
+        - dpkg_dist_files.matched > 0
+        - lookup('ansible.builtin.fileglob', item.path | regex_replace('\\.dpkg-dist$', '')) | length > 0
+
+    # ------------------------------------------------------------
+    # Leere Backup-Verzeichnisse entfernen
+    # ------------------------------------------------------------
+    - name: Prüfe, ob Backup-Verzeichnis Dateien enthält
+      find:
+        paths: "{{ backup_dir }}"
+        file_type: file
+      register: backup_content
+
+    - name: Entferne leeres Backup-Verzeichnis
+      file:
+        path: "{{ backup_dir }}"
+        state: absent
+      when: backup_content.matched == 0
+
+    # ------------------------------------------------------------
     # Zusammenfassung
     # ------------------------------------------------------------
-    - name: Zusammenfassung anzeigen
+    - name: Zusammenfassung
       debug:
         msg:
-          - "✅ Paketquellen aktualisiert"
-          - "✅ Installierte Pakete aktualisiert"
-          - "✅ Alte Pakete entfernt und System bereinigt"
-          - "✅ Backups und Logs gespeichert unter: {{ backup_dir }}"
-          - "{{ '♻️  Neustart erforderlich' if reboot_required else 'ℹ️  Kein Neustart nötig' }}"
-          - "{{ '🧩 Kernel-Update verfügbar' if kernel_update_available else '✅ Kernel aktuell' }}"
-          - "🚀 APT-Update & Upgrade abgeschlossen"
+          - "APT-Upgrade abgeschlossen auf {{ inventory_hostname }}"
+          - "{{ 'Neustart erforderlich' if reboot_required else 'Kein Neustart notwendig' }}"
