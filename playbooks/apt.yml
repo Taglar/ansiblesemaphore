@@ -13,7 +13,7 @@
   vars:
     backup_root: "/var/backups"
     log_dir: "/var/log/ansible"
-    lock_file: "/var/lock/apt_update.lock"
+    lock_file: "{{ backup_root }}/apt_update.lock"
 
   # Preflight und globale Variablen
   pre_tasks:
@@ -45,18 +45,12 @@
       file:
         path: "{{ lock_file }}"
         state: touch
-        owner: root
-        group: root
-        mode: '0644'
 
     # Logging-Verzeichnis und Log-Datei anlegen
     - name: Stelle sicher, dass das Logging-Verzeichnis existiert
       file:
         path: "{{ log_dir }}"
         state: directory
-        owner: root
-        group: root
-        mode: '0755'
 
     - name: Log-Datei initialisieren
       copy:
@@ -73,17 +67,11 @@
       file:
         path: "{{ root_backup_dir }}"
         state: directory
-        owner: root
-        group: root
-        mode: '0755'
 
     - name: Stelle sicher, dass das Host-Backup-Verzeichnis existiert
       file:
         path: "{{ host_backup_dir }}"
         state: directory
-        owner: root
-        group: root
-        mode: '0755'
 
     # APT-Operationen
     - name: Aktualisiere Paketquellen (apt update)
