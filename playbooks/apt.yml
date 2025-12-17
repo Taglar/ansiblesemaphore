@@ -1,30 +1,46 @@
 ---
-- name: APT Update & Upgrade mit Backup und Cleanup
+- name: APT Update & Upgrade mit Backup, Cleanup und Logging
   hosts: LinuxUbuntu
   become: true
   gather_facts: true
 
   vars:
     backup_root: "/var/backups"
+    log_dir: "/var/log/ansible"
 
   pre_tasks:
     - name: Globalen Zeitstempel setzen
       run_once: true
+      delegate_to: localhost
       set_fact:
-        backup_date: "{{ ansible_date_time.iso8601_basic_short }}"
+        backup_date: "{{ lookup('pipe', 'date +%Y%m%dT%H%M%S') }}"
 
-    - name: Backup-Variablen setzen
+    - name: Backup- und Log-Variablen setzen
       set_fact:
+        backup_base_dir: "{{ backup_root }}/apt_config_{{ backup_date }}"
         backup_dir: "{{ backup_root }}/apt_config_{{ backup_date }}/{{ inventory_hostname }}"
+        log_file: "{{ log_dir }}/apt_update_{{ backup_date }}.log"
 
   tasks:
-
-    # ------------------------------------------------------------
-    # Backup-Verzeichnis vorbereiten
-    # ------------------------------------------------------------
     - name: Stelle sicher, dass /var/backups existiert
       file:
         path: /var/backups
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Stelle sicher, dass /var/log/ansible existiert
+      file:
+        path: "{{ log_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Stelle sicher, dass apt_config Root-Verzeichnis existiert
+      file:
+        path: "{{ backup_base_dir }}"
         state: directory
         owner: root
         group: root
@@ -36,23 +52,31 @@
         state: directory
         mode: '0755'
 
-    # ------------------------------------------------------------
-    # APT Update & Upgrade
-    # ------------------------------------------------------------
     - name: Paketquellen aktualisieren
       apt:
         update_cache: yes
         cache_valid_time: 3600
+      register: apt_update_result
+
+    - name: Logge apt update
+      lineinfile:
+        path: "{{ log_file }}"
+        create: yes
+        line: "{{ inventory_hostname }} - apt update ausgeführt"
 
     - name: System upgraden
       apt:
         upgrade: dist
         autoremove: yes
         autoclean: yes
+      register: apt_upgrade_result
 
-    # ------------------------------------------------------------
-    # Reboot-Check
-    # ------------------------------------------------------------
+    - name: Logge apt upgrade
+      lineinfile:
+        path: "{{ log_file }}"
+        create: yes
+        line: "{{ inventory_hostname }} - apt upgrade ausgeführt"
+
     - name: Prüfe, ob Reboot erforderlich ist
       stat:
         path: /var/run/reboot-required
@@ -62,9 +86,12 @@
       set_fact:
         reboot_required: "{{ reboot_check.stat.exists | default(false) }}"
 
-    # ------------------------------------------------------------
-    # dpkg-dist Dateien sichern
-    # ------------------------------------------------------------
+    - name: Logge Reboot-Status
+      lineinfile:
+        path: "{{ log_file }}"
+        create: yes
+        line: "{{ inventory_hostname }} - Reboot erforderlich: {{ reboot_required }}"
+
     - name: Suche nach .dpkg-dist Dateien
       find:
         paths: /etc
@@ -79,7 +106,7 @@
       loop: "{{ dpkg_dist_files.files }}"
       when: dpkg_dist_files.matched > 0
 
-    - name: Originaldateien sichern (falls vorhanden)
+    - name: Originaldateien sichern
       copy:
         src: "{{ item.path | regex_replace('\\.dpkg-dist$', '') }}"
         dest: "{{ backup_dir }}/"
@@ -89,24 +116,30 @@
         - dpkg_dist_files.matched > 0
         - lookup('ansible.builtin.fileglob', item.path | regex_replace('\\.dpkg-dist$', '')) | length > 0
 
-    # ------------------------------------------------------------
-    # Leere Backup-Verzeichnisse entfernen
-    # ------------------------------------------------------------
     - name: Prüfe, ob Backup-Verzeichnis Dateien enthält
       find:
         paths: "{{ backup_dir }}"
         file_type: file
       register: backup_content
 
-    - name: Entferne leeres Backup-Verzeichnis
+    - name: Entferne leeres Host-Backup-Verzeichnis
       file:
         path: "{{ backup_dir }}"
         state: absent
       when: backup_content.matched == 0
 
-    # ------------------------------------------------------------
-    # Zusammenfassung
-    # ------------------------------------------------------------
+    - name: Prüfe, ob Root-Backup-Verzeichnis leer ist
+      find:
+        paths: "{{ backup_base_dir }}"
+        file_type: directory
+      register: root_backup_content
+
+    - name: Entferne leeres Root-Backup-Verzeichnis
+      file:
+        path: "{{ backup_base_dir }}"
+        state: absent
+      when: root_backup_content.matched == 0
+
     - name: Zusammenfassung
       debug:
         msg:
