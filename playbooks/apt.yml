@@ -1,5 +1,5 @@
 ---
-- name: APT Update & Upgrade mit Backup, Cleanup und Logging
+- name: APT Update & Upgrade mit Preflight, Locking, Backup, Cleanup und Logging
   hosts: LinuxUbuntu
   become: true
   gather_facts: true
@@ -7,29 +7,76 @@
   vars:
     backup_root: "/var/backups"
     log_dir: "/var/log/ansible"
+    lock_file: "/var/run/apt_update.lock"
 
   pre_tasks:
-    - name: Globalen Zeitstempel setzen
+    - name: Preflight – Prüfe Root-Rechte
+      command: id -u
+      register: uid_check
+      changed_when: false
+      failed_when: uid_check.stdout != "0"
+
+    - name: Preflight – Prüfe ob Lock existiert
+      stat:
+        path: "{{ lock_file }}"
+      register: lock_stat
+
+    - name: Preflight – Abbruch bei aktivem Lock
+      fail:
+        msg: "Ein APT-Update läuft bereits"
+      when: lock_stat.stat.exists
+
+    - name: Preflight – Prüfe ob /var/log existiert
+      stat:
+        path: /var/log
+      register: log_stat
+
+    - name: Preflight – Abbruch wenn /var/log fehlt
+      fail:
+        msg: "/var/log existiert nicht – Logging zwingend erforderlich"
+      when: not log_stat.stat.exists
+
+    - name: Preflight – Prüfe ob APT gesperrt ist
+      stat:
+        path: /var/lib/dpkg/lock-frontend
+      register: dpkg_lock
+
+    - name: Preflight – Abbruch bei aktivem APT-Lock
+      fail:
+        msg: "APT ist aktuell gesperrt (dpkg lock)"
+      when: dpkg_lock.stat.exists
+
+    - name: Preflight – Prüfe /var/backups
+      stat:
+        path: /var/backups
+      register: backups_stat
+
+    - name: Preflight – Abbruch wenn /var/backups fehlt
+      fail:
+        msg: "/var/backups existiert nicht"
+      when: not backups_stat.stat.exists
+
+    - name: Lock setzen
+      file:
+        path: "{{ lock_file }}"
+        state: touch
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Zeitstempel setzen
       run_once: true
       delegate_to: localhost
       set_fact:
         backup_date: "{{ lookup('pipe', 'date +%Y%m%dT%H%M%S') }}"
 
-    - name: Backup- und Log-Variablen setzen
+    - name: Variablen setzen
       set_fact:
         backup_base_dir: "{{ backup_root }}/apt_config_{{ backup_date }}"
         backup_dir: "{{ backup_root }}/apt_config_{{ backup_date }}/{{ inventory_hostname }}"
-        log_file: "{{ log_dir }}/apt_update_{{ backup_date }}.log"
+        log_file: "{{ log_dir }}/apt_update_{{ backup_date }}_{{ inventory_hostname }}.log"
 
   tasks:
-    - name: Stelle sicher, dass /var/backups existiert
-      file:
-        path: /var/backups
-        state: directory
-        owner: root
-        group: root
-        mode: '0755'
-
     - name: Stelle sicher, dass /var/log/ansible existiert
       file:
         path: "{{ log_dir }}"
@@ -37,6 +84,16 @@
         owner: root
         group: root
         mode: '0755'
+
+    - name: Initialisiere Logdatei
+      copy:
+        dest: "{{ log_file }}"
+        content: |
+          Host: {{ inventory_hostname }}
+          Start: {{ ansible_date_time.iso8601 }}
+        owner: root
+        group: root
+        mode: '0644'
 
     - name: Stelle sicher, dass apt_config Root-Verzeichnis existiert
       file:
@@ -56,26 +113,12 @@
       apt:
         update_cache: yes
         cache_valid_time: 3600
-      register: apt_update_result
-
-    - name: Logge apt update
-      lineinfile:
-        path: "{{ log_file }}"
-        create: yes
-        line: "{{ inventory_hostname }} - apt update ausgeführt"
 
     - name: System upgraden
       apt:
         upgrade: dist
         autoremove: yes
         autoclean: yes
-      register: apt_upgrade_result
-
-    - name: Logge apt upgrade
-      lineinfile:
-        path: "{{ log_file }}"
-        create: yes
-        line: "{{ inventory_hostname }} - apt upgrade ausgeführt"
 
     - name: Prüfe, ob Reboot erforderlich ist
       stat:
@@ -89,8 +132,7 @@
     - name: Logge Reboot-Status
       lineinfile:
         path: "{{ log_file }}"
-        create: yes
-        line: "{{ inventory_hostname }} - Reboot erforderlich: {{ reboot_required }}"
+        line: "Reboot erforderlich: {{ reboot_required }}"
 
     - name: Suche nach .dpkg-dist Dateien
       find:
@@ -139,6 +181,17 @@
         path: "{{ backup_base_dir }}"
         state: absent
       when: root_backup_content.matched == 0
+
+    - name: Finalisiere Logdatei
+      lineinfile:
+        path: "{{ log_file }}"
+        line: "Ende: {{ ansible_date_time.iso8601 }}"
+
+  post_tasks:
+    - name: Lock entfernen
+      file:
+        path: "{{ lock_file }}"
+        state: absent
 
     - name: Zusammenfassung
       debug:
