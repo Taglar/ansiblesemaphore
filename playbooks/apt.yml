@@ -1,25 +1,45 @@
 ---
+# APT Update & Upgrade mit Locking, Backup, Cleanup und Logging
+# Dieses Playbook führt ein apt-Update/Upgrade durch, legt Backups geänderter Konfigurationsdateien an,
+# schreibt Logfiles und verhindert parallele Ausführungen durch eine Lock-Datei.
+# Alle Tasks laufen mit Root-Rechten (become: true).
+
 - name: APT Update & Upgrade mit Locking, Backup, Cleanup und Logging
   hosts: LinuxUbuntu
   become: true
   gather_facts: true
+  serial: 1
 
   vars:
     backup_root: "/var/backups"
     log_dir: "/var/log/ansible"
-    lock_dir: "/var/lock"
     lock_file: "/var/lock/apt_update.lock"
 
+  # Preflight und globale Variablen
   pre_tasks:
+    - name: Generiere globalen Zeitstempel
+      run_once: true
+      delegate_to: localhost
+      set_fact:
+        backup_date: "{{ lookup('pipe', 'date +%Y%m%dT%H%M%S') }}"
+
+    - name: Setze host-spezifische Fakten
+      set_fact:
+        host_backup_dir: "{{ backup_root }}/apt_config_{{ backup_date }}/{{ inventory_hostname }}"
+        root_backup_dir: "{{ backup_root }}/apt_config_{{ backup_date }}"
+        log_file: "{{ log_dir }}/apt_update_{{ backup_date }}_{{ inventory_hostname }}.log"
+
+  tasks:
+    # Lock-Datei prüfen und setzen
     - name: Prüfe ob Lock existiert
       stat:
         path: "{{ lock_file }}"
       register: lock_stat
 
     - name: Abbruch bei aktivem Lock
-      fail:
-        msg: "Ein APT-Update läuft bereits"
       when: lock_stat.stat.exists
+      fail:
+        msg: "Lock-Datei {{ lock_file }} existiert bereits – ein anderer Lauf ist aktiv."
 
     - name: Lock setzen
       file:
@@ -29,20 +49,8 @@
         group: root
         mode: '0644'
 
-    - name: Zeitstempel setzen
-      run_once: true
-      delegate_to: localhost
-      set_fact:
-        backup_date: "{{ lookup('pipe', 'date +%Y%m%dT%H%M%S') }}"
-
-    - name: Variablen setzen
-      set_fact:
-        backup_base_dir: "{{ backup_root }}/apt_config_{{ backup_date }}"
-        backup_dir: "{{ backup_root }}/apt_config_{{ backup_date }}/{{ inventory_hostname }}"
-        log_file: "{{ log_dir }}/apt_update_{{ backup_date }}_{{ inventory_hostname }}.log"
-
-  tasks:
-    - name: Stelle sicher, dass /var/log/ansible existiert
+    # Logging-Verzeichnis und Log-Datei anlegen
+    - name: Stelle sicher, dass das Logging-Verzeichnis existiert
       file:
         path: "{{ log_dir }}"
         state: directory
@@ -50,116 +58,132 @@
         group: root
         mode: '0755'
 
-    - name: Initialisiere Logdatei
+    - name: Log-Datei initialisieren
       copy:
         dest: "{{ log_file }}"
         content: |
+          === APT Update Log ===
           Host: {{ inventory_hostname }}
-          Start: {{ ansible_date_time.iso8601 }}
-        owner: root
-        group: root
-        mode: '0644'
+          Datum: {{ lookup('pipe', 'date') }}
+          ======================
+      notify: Log-Ergebnis anhängen
 
-    - name: Stelle sicher, dass apt_config Root-Verzeichnis existiert
+    # Backup-Verzeichnisse anlegen
+    - name: Stelle sicher, dass das Backup-Root existiert
       file:
-        path: "{{ backup_base_dir }}"
+        path: "{{ root_backup_dir }}"
         state: directory
         owner: root
         group: root
         mode: '0755'
 
-    - name: Backup-Verzeichnis für Host anlegen
+    - name: Stelle sicher, dass das Host-Backup-Verzeichnis existiert
       file:
-        path: "{{ backup_dir }}"
+        path: "{{ host_backup_dir }}"
         state: directory
+        owner: root
+        group: root
         mode: '0755'
 
-    - name: Paketquellen aktualisieren
+    # APT-Operationen
+    - name: Aktualisiere Paketquellen (apt update)
       apt:
         update_cache: yes
-        cache_valid_time: 3600
+      register: update_result
 
-    - name: System upgraden
+    - name: Führe APT-Upgrade durch (dist-upgrade)
       apt:
         upgrade: dist
         autoremove: yes
         autoclean: yes
+      register: upgrade_result
 
-    - name: Prüfe, ob Reboot erforderlich ist
+    # Kernel-Update und Reboot-Check
+    - name: Prüfe, ob Kernel-Update verfügbar ist
+      shell: |
+        apt list --upgradable 2>/dev/null | grep -E 'linux-image|linux-headers' || true
+      register: kernel_check
+      changed_when: false
+
+    - name: Prüfe, ob Reboot notwendig ist
       stat:
         path: /var/run/reboot-required
       register: reboot_check
 
-    - name: Reboot-Status setzen
+    - name: Setze Status-Fakten
       set_fact:
+        kernel_update_available: "{{ kernel_check.stdout != '' }}"
         reboot_required: "{{ reboot_check.stat.exists | default(false) }}"
 
-    - name: Logge Reboot-Status
-      lineinfile:
-        path: "{{ log_file }}"
-        line: "Reboot erforderlich: {{ reboot_required }}"
-
-    - name: Suche nach .dpkg-dist Dateien
+    # Neue oder geänderte Konfigurationsdateien sichern
+    - name: Suche nach neuen oder geänderten Konfigurationsdateien
       find:
         paths: /etc
         patterns: "*.dpkg-dist"
-      register: dpkg_dist_files
+      register: new_config_files
 
-    - name: .dpkg-dist Dateien sichern
+    - name: Sichere neue Dateien
       copy:
         src: "{{ item.path }}"
-        dest: "{{ backup_dir }}/"
+        dest: "{{ host_backup_dir }}/"
         remote_src: true
-      loop: "{{ dpkg_dist_files.files }}"
-      when: dpkg_dist_files.matched > 0
+      loop: "{{ new_config_files.files }}"
+      when: new_config_files.matched > 0
 
-    - name: Originaldateien sichern
+    - name: Prüfe, ob Originaldateien existieren
+      stat:
+        path: "{{ item.path | regex_replace('.dpkg-dist$', '') }}"
+      loop: "{{ new_config_files.files }}"
+      register: original_files
+      when: new_config_files.matched > 0
+
+    - name: Sichere Originaldateien (falls vorhanden)
       copy:
-        src: "{{ item.path | regex_replace('\\.dpkg-dist$', '') }}"
-        dest: "{{ backup_dir }}/"
+        src: "{{ item.stat.path }}"
+        dest: "{{ host_backup_dir }}/"
         remote_src: true
-      loop: "{{ dpkg_dist_files.files }}"
+      loop: "{{ original_files.results }}"
       when:
-        - dpkg_dist_files.matched > 0
-        - lookup('ansible.builtin.fileglob', item.path | regex_replace('\\.dpkg-dist$', '')) | length > 0
+        - original_files.results is defined
+        - item.stat.exists is defined
+        - item.stat.exists
 
-    - name: Prüfe, ob Backup-Verzeichnis Dateien enthält
-      find:
-        paths: "{{ backup_dir }}"
-        file_type: file
-      register: backup_content
-
-    - name: Entferne leeres Host-Backup-Verzeichnis
+    # Host-Backup-Verzeichnis entfernen, wenn keine Dateien gesichert wurden
+    - name: Entferne Host-Backup-Verzeichnis, wenn leer
       file:
-        path: "{{ backup_dir }}"
+        path: "{{ host_backup_dir }}"
         state: absent
-      when: backup_content.matched == 0
+      when: new_config_files.matched | default(0) == 0
 
-    - name: Prüfe, ob Root-Backup-Verzeichnis leer ist
-      find:
-        paths: "{{ backup_base_dir }}"
-        file_type: directory
-      register: root_backup_content
+    # Zusammenfassung und Logging
+    - name: Zusammenfassung ausgeben
+      debug:
+        msg:
+          - "✅ Paketquellen aktualisiert"
+          - "✅ Pakete aktualisiert"
+          - "✅ Autoremove/Autoclean ausgeführt"
+          - "{{ '♻️  Neustart erforderlich' if reboot_required else 'ℹ️  Kein Neustart nötig' }}"
+          - "{{ '🧩 Kernel-Update verfügbar' if kernel_update_available else '✅ Kernel aktuell' }}"
+          - "Backups abgelegt unter: {{ host_backup_dir if new_config_files.matched > 0 else 'kein Backup nötig' }}"
+          - "Logfile: {{ log_file }}"
 
-    - name: Entferne leeres Root-Backup-Verzeichnis
-      file:
-        path: "{{ backup_base_dir }}"
-        state: absent
-      when: root_backup_content.matched == 0
-
-    - name: Finalisiere Logdatei
+    - name: Log-Ergebnis anhängen
       lineinfile:
         path: "{{ log_file }}"
-        line: "Ende: {{ ansible_date_time.iso8601 }}"
+        line: |
+          Update: {{ update_result.changed }}, Upgrade: {{ upgrade_result.changed }}, Neustart erforderlich: {{ reboot_required }}, Kernel-Update: {{ kernel_update_available }}, Backups: {{ new_config_files.matched | default(0) }} Dateien
+        create: yes
 
+  # Handler für Logdateien
+  handlers:
+    - name: Log-Ergebnis anhängen
+      # Platzhalter-Handler, wird durch Notify aufgerufen – Inhalt oben definiert
+      debug:
+        msg: ""
+
+  # Lock entfernen – immer ausführen
   post_tasks:
-    - name: Lock entfernen
+    - name: Entferne Lock-Datei
       file:
         path: "{{ lock_file }}"
         state: absent
-
-    - name: Zusammenfassung
-      debug:
-        msg:
-          - "APT-Upgrade abgeschlossen auf {{ inventory_hostname }}"
-          - "{{ 'Neustart erforderlich' if reboot_required else 'Kein Neustart notwendig' }}"
