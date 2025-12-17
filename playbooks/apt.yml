@@ -10,11 +10,17 @@
     lock_file: "/var/run/apt_update.lock"
 
   pre_tasks:
-    - name: Preflight – Prüfe Root-Rechte
-      command: id -u
-      register: uid_check
-      changed_when: false
-      failed_when: uid_check.stdout != "0"
+    - name: Preflight – Prüfe Ansible Become
+      assert:
+        that:
+          - ansible_user_id is defined
+        fail_msg: "Ansible Benutzer nicht ermittelbar"
+
+    - name: Preflight – Prüfe effektive Root-Rechte
+      assert:
+        that:
+          - ansible_effective_user_id == 0
+        fail_msg: "Playbook läuft nicht mit Root-Rechten (become fehlgeschlagen)"
 
     - name: Preflight – Prüfe ob Lock existiert
       stat:
@@ -45,16 +51,6 @@
       fail:
         msg: "APT ist aktuell gesperrt (dpkg lock)"
       when: dpkg_lock.stat.exists
-
-    - name: Preflight – Prüfe /var/backups
-      stat:
-        path: /var/backups
-      register: backups_stat
-
-    - name: Preflight – Abbruch wenn /var/backups fehlt
-      fail:
-        msg: "/var/backups existiert nicht"
-      when: not backups_stat.stat.exists
 
     - name: Lock setzen
       file:
