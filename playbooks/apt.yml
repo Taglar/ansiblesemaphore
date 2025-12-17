@@ -1,5 +1,5 @@
 ---
-- name: APT Update & Upgrade mit Preflight, Locking, Backup, Cleanup und Logging
+- name: APT Update & Upgrade mit Locking, Backup, Cleanup und Logging
   hosts: LinuxUbuntu
   become: true
   gather_facts: true
@@ -10,18 +10,6 @@
     lock_file: "/var/run/apt_update.lock"
 
   pre_tasks:
-    - name: Preflight – Prüfe Ansible Become
-      assert:
-        that:
-          - ansible_user_id is defined
-        fail_msg: "Ansible Benutzer nicht ermittelbar"
-
-    - name: Preflight – Prüfe effektive Root-Rechte
-      assert:
-        that:
-          - ansible_effective_user_id == 0
-        fail_msg: "Playbook läuft nicht mit Root-Rechten (become fehlgeschlagen)"
-
     - name: Preflight – Prüfe ob Lock existiert
       stat:
         path: "{{ lock_file }}"
@@ -31,26 +19,6 @@
       fail:
         msg: "Ein APT-Update läuft bereits"
       when: lock_stat.stat.exists
-
-    - name: Preflight – Prüfe ob /var/log existiert
-      stat:
-        path: /var/log
-      register: log_stat
-
-    - name: Preflight – Abbruch wenn /var/log fehlt
-      fail:
-        msg: "/var/log existiert nicht – Logging zwingend erforderlich"
-      when: not log_stat.stat.exists
-
-    - name: Preflight – Prüfe ob APT gesperrt ist
-      stat:
-        path: /var/lib/dpkg/lock-frontend
-      register: dpkg_lock
-
-    - name: Preflight – Abbruch bei aktivem APT-Lock
-      fail:
-        msg: "APT ist aktuell gesperrt (dpkg lock)"
-      when: dpkg_lock.stat.exists
 
     - name: Lock setzen
       file:
