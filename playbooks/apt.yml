@@ -7,15 +7,16 @@
   vars:
     backup_root: "/var/backups"
     log_dir: "/var/log/ansible"
-    lock_file: "/var/run/apt_update.lock"
+    lock_dir: "/var/lock"
+    lock_file: "/var/lock/apt_update.lock"
 
   pre_tasks:
-    - name: Preflight – Prüfe ob Lock existiert
+    - name: Prüfe ob Lock existiert
       stat:
         path: "{{ lock_file }}"
       register: lock_stat
 
-    - name: Preflight – Abbruch bei aktivem Lock
+    - name: Abbruch bei aktivem Lock
       fail:
         msg: "Ein APT-Update läuft bereits"
       when: lock_stat.stat.exists
