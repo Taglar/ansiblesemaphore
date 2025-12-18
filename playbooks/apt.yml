@@ -12,7 +12,8 @@
 
   vars:
     backup_root: "/var/backups"
-    log_dir: "/var/log/ansible"
+    # Logging-Verzeichnis in einem beschreibbaren Bereich
+    log_dir: "/var/tmp/ansible_logs"
     lock_file: "/var/tmp/apt_update.lock"
 
   # Preflight und globale Variablen
