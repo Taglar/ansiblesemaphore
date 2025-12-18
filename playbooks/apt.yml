@@ -6,7 +6,13 @@
 
 - name: APT Update & Upgrade mit Locking, Backup, Cleanup und Logging
   hosts: LinuxUbuntu
+  # Der Original-Playbook setzte "become_method: sudo" und
+  # "become_user: root", um sicherzustellen, dass alle Aufgaben als root via sudo
+  # ausgeführt werden. Füge diese Parameter hinzu, damit der APT-Lock wieder
+  # funktioniert und das Verhalten des Originals nachgebildet wird.
   become: true
+  become_method: sudo
+  become_user: root
   gather_facts: true
   serial: 1
 
