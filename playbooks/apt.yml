@@ -1,100 +1,109 @@
 ---
-# APT Update & Upgrade mit Locking, Backup, Cleanup und Logging
-# Dieses Playbook führt ein apt-Update/Upgrade durch, legt Backups geänderter Konfigurationsdateien an,
-# schreibt Logfiles und verhindert parallele Ausführungen durch eine Lock-Datei.
-# Alle Tasks laufen mit Root-Rechten (become: true).
-
-- name: APT Update & Upgrade mit Locking, Backup, Cleanup und Logging
+- name: APT Update & Upgrade mit Backup und Logging
   hosts: LinuxUbuntu
-  # Der Original-Playbook setzte "become_method: sudo" und
-  # "become_user: root", um sicherzustellen, dass alle Aufgaben als root via sudo
-  # ausgeführt werden. Füge diese Parameter hinzu, damit der APT-Lock wieder
-  # funktioniert und das Verhalten des Originals nachgebildet wird.
   become: true
   become_method: sudo
   become_user: root
   gather_facts: true
-  serial: 1
 
   vars:
-    # Sicher beschreibbares Backup-Verzeichnis
-    backup_root: "/var/tmp/backups"
-    # Logging-Verzeichnis in einem beschreibbaren Bereich
-    log_dir: "/var/tmp/ansible_logs"
-    lock_file: "/var/tmp/apt_update.lock"
+    backup_root: "/var/backups"
 
-  # Preflight und globale Variablen
   pre_tasks:
+    # ------------------------------------------------------------
+    # Einmaligen globalen Zeitstempel erzeugen (nur einmal, lokal)
+    # ------------------------------------------------------------
     - name: Generiere globalen Zeitstempel
       run_once: true
       delegate_to: localhost
+      vars:
+        ts_command: "date +%Y-%m-%d_%H%M%S"
       set_fact:
-        backup_date: "{{ lookup('pipe', 'date +%Y%m%dT%H%M%S') }}"
+        generated_backup_date: "{{ lookup('pipe', ts_command) }}"
 
-    - name: Setze host-spezifische Fakten
+    - name: Globalen Zeitstempel an alle Hosts weitergeben
+      run_once: true
+      add_host:
+        name: "global_vars_holder"
+        backup_date: "{{ generated_backup_date }}"
+
+    - name: Hole globalen Zeitstempel aus global_vars_holder
       set_fact:
-        host_backup_dir: "{{ backup_root }}/apt_config_{{ backup_date }}/{{ inventory_hostname }}"
-        root_backup_dir: "{{ backup_root }}/apt_config_{{ backup_date }}"
-        log_file: "{{ log_dir }}/apt_update_{{ backup_date }}_{{ inventory_hostname }}.log"
+        backup_date: "{{ hostvars['global_vars_holder'].backup_date }}"
+        backup_dir: "{{ backup_root }}/apt_config_{{ hostvars['global_vars_holder'].backup_date }}"
+        diff_log: "{{ backup_root }}/apt_config_{{ hostvars['global_vars_holder'].backup_date }}/apt_diff.log"
+        new_files_log: "{{ backup_root }}/apt_config_{{ hostvars['global_vars_holder'].backup_date }}/new_config_files.log"
 
   tasks:
-    # Lock-Datei prüfen und setzen
-    - name: Prüfe ob Lock existiert
+
+    # ------------------------------------------------------------
+    # Prüfen und ggf. Rechte für /var/backups anpassen
+    # ------------------------------------------------------------
+    - name: Prüfe Schreibrechte auf /var/backups
       stat:
-        path: "{{ lock_file }}"
-      register: lock_stat
+        path: /var/backups
+      register: backups_stat
 
-    - name: Abbruch bei aktivem Lock
-      when: lock_stat.stat.exists
-      fail:
-        msg: "Lock-Datei {{ lock_file }} existiert bereits – ein anderer Lauf ist aktiv."
-
-    - name: Lock setzen
+    - name: Rechte für /var/backups anpassen (falls nötig)
       file:
-        path: "{{ lock_file }}"
-        state: touch
+        path: /var/backups
+        owner: root
+        group: root
+        mode: '0755'
+      when: backups_stat.stat.exists and backups_stat.stat.mode|int != 493
+      become: true
 
-    # Logging-Verzeichnis und Log-Datei anlegen
-    - name: Stelle sicher, dass das Logging-Verzeichnis existiert
+    # ------------------------------------------------------------
+    # Backup- und Log-Verzeichnisse anlegen
+    # ------------------------------------------------------------
+    - name: Verzeichnisse für Backups/Logs anlegen
       file:
-        path: "{{ log_dir }}"
+        path: "{{ item }}"
         state: directory
+        mode: '0755'
+      loop:
+        - "{{ backup_dir }}"
+        - "/var/log"
 
-    - name: Log-Datei initialisieren
+    # ------------------------------------------------------------
+    # Header-Dateien anlegen (nur auf bestimmtem Host)
+    # ------------------------------------------------------------
+    - name: Header für Diff-Log anlegen
       copy:
-        dest: "{{ log_file }}"
+        dest: "{{ diff_log }}"
         content: |
-          === APT Update Log ===
-          Host: {{ inventory_hostname }}
+          === APT Konfigurationsänderungen ===
           Datum: {{ lookup('pipe', 'date') }}
-          ======================
-      notify: Log-Ergebnis anhängen
+          ====================================
+      when: inventory_hostname == '81.169.250.132'
 
-    # Backup-Verzeichnisse anlegen
-    - name: Stelle sicher, dass das Backup-Root existiert
-      file:
-        path: "{{ root_backup_dir }}"
-        state: directory
+    - name: Header für Liste der neuen Konfigurationsdateien anlegen
+      copy:
+        dest: "{{ new_files_log }}"
+        content: |
+          === Neue Konfigurationsdateien ===
+          Datum: {{ lookup('pipe', 'date') }}
+          ==================================
+      when: inventory_hostname == '81.169.250.132'
 
-    - name: Stelle sicher, dass das Host-Backup-Verzeichnis existiert
-      file:
-        path: "{{ host_backup_dir }}"
-        state: directory
-
-    # APT-Operationen
-    - name: Aktualisiere Paketquellen (apt update)
+    # ------------------------------------------------------------
+    # Paketquellen und Upgrades
+    # ------------------------------------------------------------
+    - name: Paketquellen aktualisieren (apt update)
       apt:
         update_cache: yes
       register: update_result
 
-    - name: Führe APT-Upgrade durch (dist-upgrade)
+    - name: Führe APT Upgrade durch (aktualisiere installierte Pakete)
       apt:
         upgrade: dist
         autoremove: yes
         autoclean: yes
       register: upgrade_result
 
+    # ------------------------------------------------------------
     # Kernel-Update und Reboot-Check
+    # ------------------------------------------------------------
     - name: Prüfe, ob Kernel-Update verfügbar ist
       shell: |
         apt list --upgradable 2>/dev/null | grep -E 'linux-image|linux-headers' || true
@@ -106,22 +115,24 @@
         path: /var/run/reboot-required
       register: reboot_check
 
-    - name: Setze Status-Fakten
+    - name: Setze Statusfakten für Kernel/Reboot
       set_fact:
         kernel_update_available: "{{ kernel_check.stdout != '' }}"
         reboot_required: "{{ reboot_check.stat.exists | default(false) }}"
 
+    # ------------------------------------------------------------
     # Neue oder geänderte Konfigurationsdateien sichern
+    # ------------------------------------------------------------
     - name: Suche nach neuen oder geänderten Konfigurationsdateien
       find:
         paths: /etc
         patterns: "*.dpkg-dist"
       register: new_config_files
 
-    - name: Sichere neue Dateien
+    - name: Neue Dateien sichern
       copy:
         src: "{{ item.path }}"
-        dest: "{{ host_backup_dir }}/"
+        dest: "{{ backup_dir }}/"
         remote_src: true
       loop: "{{ new_config_files.files }}"
       when: new_config_files.matched > 0
@@ -133,53 +144,32 @@
       register: original_files
       when: new_config_files.matched > 0
 
-    - name: Sichere Originaldateien (falls vorhanden)
+    - name: Originaldateien sichern (falls vorhanden)
       copy:
         src: "{{ item.stat.path }}"
-        dest: "{{ host_backup_dir }}/"
+        dest: "{{ backup_dir }}/"
         remote_src: true
       loop: "{{ original_files.results }}"
       when:
-        - original_files.results is defined
         - item.stat.exists is defined
         - item.stat.exists
 
-    # Host-Backup-Verzeichnis entfernen, wenn keine Dateien gesichert wurden
-    - name: Entferne Host-Backup-Verzeichnis, wenn leer
+    - name: Stelle sicher, dass Backup-Verzeichnis existiert (Failsafe)
       file:
-        path: "{{ host_backup_dir }}"
-        state: absent
-      when: new_config_files.matched | default(0) == 0
+        path: "{{ backup_dir }}"
+        state: directory
+        mode: '0755'
 
-    # Zusammenfassung und Logging
-    - name: Zusammenfassung ausgeben
+    # ------------------------------------------------------------
+    # Zusammenfassung
+    # ------------------------------------------------------------
+    - name: Zusammenfassung anzeigen
       debug:
         msg:
           - "✅ Paketquellen aktualisiert"
-          - "✅ Pakete aktualisiert"
-          - "✅ Autoremove/Autoclean ausgeführt"
+          - "✅ Installierte Pakete aktualisiert"
+          - "✅ Alte Pakete entfernt und System bereinigt"
+          - "✅ Backups und Logs gespeichert unter: {{ backup_dir }}"
           - "{{ '♻️  Neustart erforderlich' if reboot_required else 'ℹ️  Kein Neustart nötig' }}"
           - "{{ '🧩 Kernel-Update verfügbar' if kernel_update_available else '✅ Kernel aktuell' }}"
-          - "Backups abgelegt unter: {{ host_backup_dir if new_config_files.matched > 0 else 'kein Backup nötig' }}"
-          - "Logfile: {{ log_file }}"
-
-    - name: Log-Ergebnis anhängen
-      lineinfile:
-        path: "{{ log_file }}"
-        line: |
-          Update: {{ update_result.changed }}, Upgrade: {{ upgrade_result.changed }}, Neustart erforderlich: {{ reboot_required }}, Kernel-Update: {{ kernel_update_available }}, Backups: {{ new_config_files.matched | default(0) }} Dateien
-        create: yes
-
-  # Handler für Logdateien
-  handlers:
-    - name: Log-Ergebnis anhängen
-      # Platzhalter-Handler, wird durch Notify aufgerufen – Inhalt oben definiert
-      debug:
-        msg: ""
-
-  # Lock entfernen – immer ausführen
-  post_tasks:
-    - name: Entferne Lock-Datei
-      file:
-        path: "{{ lock_file }}"
-        state: absent
+          - "🚀 APT-Update & Upgrade abgeschlossen"
