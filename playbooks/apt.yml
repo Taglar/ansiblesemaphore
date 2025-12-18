@@ -13,7 +13,7 @@
   vars:
     backup_root: "/var/backups"
     log_dir: "/var/log/ansible"
-    lock_file: "{{ backup_root }}/apt_update.lock"
+    lock_file: "/var/tmp/apt_update.lock"
 
   # Preflight und globale Variablen
   pre_tasks:
