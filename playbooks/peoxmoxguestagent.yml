@@ -2,15 +2,35 @@
 - name: QEMU Guest Agent installieren oder aktualisieren und aktivieren
   hosts: LinuxUbuntuInternal
   become: true
+  become_method: sudo
   gather_facts: true
 
   tasks:
+    - name: Prüfen welcher Benutzer den Task ausführt
+      ansible.builtin.command: whoami
+      register: whoami_result
+      changed_when: false
+
+    - name: Ausgabe Benutzer
+      ansible.builtin.debug:
+        msg: "Task läuft auf {{ inventory_hostname }} als Benutzer {{ whoami_result.stdout }}"
+
+    - name: Prüfen ob Root-Rechte aktiv sind
+      ansible.builtin.command: id -u
+      register: id_result
+      changed_when: false
+
+    - name: Abbrechen wenn nicht als root ausgeführt
+      ansible.builtin.fail:
+        msg: "Auf {{ inventory_hostname }} sind keine Root-Rechte aktiv. Aktuelle UID: {{ id_result.stdout }}"
+      when: id_result.stdout != "0"
+
     - name: APT-Paketliste aktualisieren
       ansible.builtin.apt:
         update_cache: true
         cache_valid_time: 3600
 
-    - name: qemu-guest-agent installieren oder bei vorhandenem Update aktualisieren
+    - name: qemu-guest-agent installieren oder aktualisieren
       ansible.builtin.apt:
         name: qemu-guest-agent
         state: latest
