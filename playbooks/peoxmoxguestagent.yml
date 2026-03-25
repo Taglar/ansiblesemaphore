@@ -1,6 +1,6 @@
 ---
 - name: QEMU Guest Agent installieren oder aktualisieren und aktivieren
-  hosts: LinuxUbuntu
+  hosts: LinuxUbuntuInternal
   become: true
   gather_facts: true
 
