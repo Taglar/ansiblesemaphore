@@ -1,0 +1,22 @@
+---
+- name: QEMU Guest Agent installieren oder aktualisieren und aktivieren
+  hosts: LinuxUbuntu
+  become: true
+  gather_facts: true
+
+  tasks:
+    - name: APT-Paketliste aktualisieren
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: qemu-guest-agent installieren oder bei vorhandenem Update aktualisieren
+      ansible.builtin.apt:
+        name: qemu-guest-agent
+        state: latest
+
+    - name: qemu-guest-agent aktivieren und starten
+      ansible.builtin.systemd_service:
+        name: qemu-guest-agent
+        enabled: true
+        state: started
