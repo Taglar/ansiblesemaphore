@@ -1,9 +1,11 @@
 ---
-- name: Prüfen, ob kompromittierte axios-Versionen auf Systemen vorhanden sind
-  hosts: all
+- name: Prüfen, ob kompromittierte axios-Versionen auf Systemen vorhanden si
+  hosts: LinuxUbuntu
   become: true
-  gather_facts: false
-
+  become_method: sudo
+  become_user: root
+  gather_facts: true
+  
   vars:
     axios_bad_versions:
       - "1.14.1"
