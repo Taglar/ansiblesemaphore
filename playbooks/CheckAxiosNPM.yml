@@ -1,0 +1,179 @@
+---
+- name: Prüfen, ob kompromittierte axios-Versionen auf Systemen vorhanden sind
+  hosts: all
+  become: true
+  gather_facts: false
+
+  vars:
+    axios_bad_versions:
+      - "1.14.1"
+      - "0.30.4"
+
+    search_paths:
+      - /opt
+      - /srv
+      - /var/www
+      - /home
+      - /root
+      - /usr/local
+
+  tasks:
+    - name: Prüfen, ob Node.js vorhanden ist
+      ansible.builtin.command: node --version
+      register: node_check
+      changed_when: false
+      failed_when: false
+
+    - name: node_modules/axios/package.json Dateien finden
+      ansible.builtin.find:
+        paths: "{{ search_paths }}"
+        recurse: true
+        file_type: file
+        patterns: "package.json"
+        contains: '"name"[[:space:]]*:[[:space:]]*"axios"'
+      register: axios_package_files
+      failed_when: false
+
+    - name: Axios-Versionen aus gefundener package.json lesen
+      ansible.builtin.slurp:
+        src: "{{ item.path }}"
+      loop: "{{ axios_package_files.files | default([]) }}"
+      register: axios_package_contents
+      no_log: true
+
+    - name: Axios-Funde strukturieren
+      ansible.builtin.set_fact:
+        axios_detected: >-
+          {{
+            (axios_detected | default([]))
+            +
+            [
+              {
+                'path': item.item.path,
+                'version': (
+                  (item.content | b64decode)
+                  | regex_search('"version"[[:space:]]*:[[:space:]]*"([^"]+)"', '\1')
+                  | first
+                  | default('unbekannt')
+                )
+              }
+            ]
+          }}
+      loop: "{{ axios_package_contents.results | default([]) }}"
+
+    - name: package-lock.json Dateien finden
+      ansible.builtin.find:
+        paths: "{{ search_paths }}"
+        recurse: true
+        file_type: file
+        patterns: "package-lock.json"
+      register: package_lock_files
+      failed_when: false
+
+    - name: package-lock.json Inhalte lesen
+      ansible.builtin.slurp:
+        src: "{{ item.path }}"
+      loop: "{{ package_lock_files.files | default([]) }}"
+      register: package_lock_contents
+      no_log: true
+
+    - name: Verdächtige axios-Versionen in package-lock.json erkennen
+      ansible.builtin.set_fact:
+        axios_lock_hits: >-
+          {{
+            (axios_lock_hits | default([]))
+            +
+            (
+              [
+                {
+                  'path': item.item.path,
+                  'matched_versions': (
+                    axios_bad_versions
+                    | select('in', (item.content | b64decode))
+                    | list
+                  )
+                }
+              ]
+              if (
+                (
+                  axios_bad_versions
+                  | select('in', (item.content | b64decode))
+                  | list
+                  | length
+                ) > 0
+              )
+              else []
+            )
+          }}
+      loop: "{{ package_lock_contents.results | default([]) }}"
+
+    - name: npm global root ermitteln
+      ansible.builtin.command: npm root -g
+      register: npm_global_root
+      changed_when: false
+      failed_when: false
+      when: node_check.rc == 0
+
+    - name: Globale axios package.json prüfen
+      ansible.builtin.stat:
+        path: "{{ npm_global_root.stdout }}/axios/package.json"
+      register: global_axios_stat
+      when:
+        - node_check.rc == 0
+        - npm_global_root.rc == 0
+
+    - name: Globale axios package.json lesen
+      ansible.builtin.slurp:
+        src: "{{ npm_global_root.stdout }}/axios/package.json"
+      register: global_axios_content
+      when:
+        - node_check.rc == 0
+        - npm_global_root.rc == 0
+        - global_axios_stat.stat.exists | default(false)
+      no_log: true
+
+    - name: Globalen Axios-Fund ergänzen
+      ansible.builtin.set_fact:
+        axios_detected: >-
+          {{
+            (axios_detected | default([]))
+            +
+            [
+              {
+                'path': npm_global_root.stdout ~ '/axios/package.json',
+                'version': (
+                  (global_axios_content.content | b64decode)
+                  | regex_search('"version"[[:space:]]*:[[:space:]]*"([^"]+)"', '\1')
+                  | first
+                  | default('unbekannt')
+                )
+              }
+            ]
+          }}
+      when:
+        - global_axios_content is defined
+        - global_axios_content.content is defined
+
+    - name: Kompromittierte Funde filtern
+      ansible.builtin.set_fact:
+        axios_compromised_hits: >-
+          {{
+            (axios_detected | default([]))
+            | selectattr('version', 'in', axios_bad_versions)
+            | list
+          }}
+
+    - name: Ergebnis anzeigen
+      ansible.builtin.debug:
+        msg:
+          host: "{{ inventory_hostname }}"
+          axios_found: "{{ axios_detected | default([]) }}"
+          compromised_versions_found: "{{ axios_compromised_hits | default([]) }}"
+          package_lock_hits: "{{ axios_lock_hits | default([]) }}"
+
+    - name: Play fehlschlagen lassen, wenn kompromittierte Version gefunden wurde
+      ansible.builtin.fail:
+        msg: >-
+          Auf {{ inventory_hostname }} wurde mindestens eine kompromittierte axios-Version gefunden:
+          {{ axios_compromised_hits }}
+      when: (axios_compromised_hits | default([]) | length) > 0
