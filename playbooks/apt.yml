@@ -6,7 +6,6 @@
   become_user: root
   gather_facts: true
   serial: 1
-  any_errors_fatal: true
 
   vars:
     backup_base_dir: "/var/backups/ansible-apt"
@@ -49,11 +48,14 @@
 
     - name: Unterverzeichnis fuer APT-Quellen anlegen
       ansible.builtin.file:
-        path: "{{ backup_dir }}/apt-sources/sources.list.d"
+        path: "{{ item }}"
         state: directory
         owner: root
         group: root
         mode: "0750"
+      loop:
+        - "{{ backup_dir }}/apt-sources"
+        - "{{ backup_dir }}/apt-sources/sources.list.d"
 
     - name: Pruefen, ob /etc/apt/sources.list existiert
       ansible.builtin.stat:
