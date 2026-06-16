@@ -1,357 +1,175 @@
 ---
-- name: APT Update & Upgrade defensiv mit Backup und Logging
+- name: APT Update & Upgrade mit Backup und Logging
   hosts: LinuxUbuntu
   become: true
   become_method: sudo
   become_user: root
   gather_facts: true
-  serial: 1
 
   vars:
-    backup_base_dir: "/var/backups/ansible-apt"
-    backup_timestamp: "{{ ansible_date_time.date }}_{{ ansible_date_time.time | regex_replace(':', '') }}"
-    backup_dir: "{{ backup_base_dir }}/{{ inventory_hostname }}_{{ backup_timestamp }}"
-    apt_lock_timeout: 300
-
-    # Defensiver Standard: kein dist/full-upgrade. Bei Bedarf bewusst auf "dist" setzen.
-    apt_upgrade_mode: "safe"
-
-    # Sicherheitsrelevante Aktionen bleiben standardmaessig aus.
-    apt_do_autoremove: false
-    apt_do_reboot: false
+    backup_root: "/var/backups"
 
   pre_tasks:
-    - name: Sicherstellen, dass nur Debian/Ubuntu-Systeme mit APT verarbeitet werden
-      ansible.builtin.assert:
-        that:
-          - ansible_os_family == "Debian"
-          - ansible_pkg_mgr == "apt"
-        fail_msg: "Dieses Playbook ist nur fuer Debian/Ubuntu-Systeme mit APT gedacht."
-        success_msg: "Zielsystem nutzt APT und ist fuer dieses Playbook geeignet."
+    # ------------------------------------------------------------
+    # Einmaligen globalen Zeitstempel erzeugen (nur einmal, lokal)
+    # ------------------------------------------------------------
+    - name: Generiere globalen Zeitstempel
+      run_once: true
+      delegate_to: localhost
+      vars:
+        ts_command: "date +%Y-%m-%d_%H%M%S"
+      set_fact:
+        generated_backup_date: "{{ lookup('pipe', ts_command) }}"
+
+    - name: Globalen Zeitstempel an alle Hosts weitergeben
+      run_once: true
+      add_host:
+        name: "global_vars_holder"
+        backup_date: "{{ generated_backup_date }}"
+
+    - name: Hole globalen Zeitstempel aus global_vars_holder
+      set_fact:
+        backup_date: "{{ hostvars['global_vars_holder'].backup_date }}"
+        backup_dir: "{{ backup_root }}/apt_config_{{ hostvars['global_vars_holder'].backup_date }}"
+        diff_log: "{{ backup_root }}/apt_config_{{ hostvars['global_vars_holder'].backup_date }}/apt_diff.log"
+        new_files_log: "{{ backup_root }}/apt_config_{{ hostvars['global_vars_holder'].backup_date }}/new_config_files.log"
 
   tasks:
-    - name: Backup-Basisverzeichnis anlegen
-      ansible.builtin.file:
-        path: "{{ backup_base_dir }}"
-        state: directory
+
+    # ------------------------------------------------------------
+    # Prüfen und ggf. Rechte für /var/backups anpassen
+    # ------------------------------------------------------------
+    - name: Prüfe Schreibrechte auf /var/backups
+      stat:
+        path: /var/backups
+      register: backups_stat
+
+    - name: Rechte für /var/backups anpassen (falls nötig)
+      file:
+        path: /var/backups
         owner: root
         group: root
-        mode: "0750"
-      when: not ansible_check_mode
+        mode: '0755'
+      when: backups_stat.stat.exists and backups_stat.stat.mode|int != 493
+      become: true
 
-    - name: Backup-Verzeichnis fuer diesen Lauf anlegen
-      ansible.builtin.file:
-        path: "{{ backup_dir }}"
-        state: directory
-        owner: root
-        group: root
-        mode: "0750"
-      when: not ansible_check_mode
-
-    - name: Unterverzeichnis fuer APT-Quellen anlegen
-      ansible.builtin.file:
+    # ------------------------------------------------------------
+    # Backup- und Log-Verzeichnisse anlegen
+    # ------------------------------------------------------------
+    - name: Verzeichnisse für Backups/Logs anlegen
+      file:
         path: "{{ item }}"
         state: directory
-        owner: root
-        group: root
-        mode: "0750"
+        mode: '0755'
       loop:
-        - "{{ backup_dir }}/apt-sources"
-        - "{{ backup_dir }}/apt-sources/sources.list.d"
-      when: not ansible_check_mode
+        - "{{ backup_dir }}"
+        - "/var/log"
 
-    - name: Backup-Zielverzeichnis pruefen
-      ansible.builtin.stat:
-        path: "{{ backup_dir }}/apt-sources"
-      register: apt_sources_backup_dir
-      when: not ansible_check_mode
+    # ------------------------------------------------------------
+    # Header-Dateien anlegen (nur auf bestimmtem Host)
+    # ------------------------------------------------------------
+    - name: Header für Diff-Log anlegen
+      copy:
+        dest: "{{ diff_log }}"
+        content: |
+          === APT Konfigurationsänderungen ===
+          Datum: {{ lookup('pipe', 'date') }}
+          ====================================
+      when: inventory_hostname == '81.169.250.132'
 
-    - name: Sicherstellen, dass Backup-Zielverzeichnis existiert
-      ansible.builtin.assert:
-        that:
-          - apt_sources_backup_dir.stat.exists
-          - apt_sources_backup_dir.stat.isdir
-        fail_msg: "Backup-Zielverzeichnis wurde nicht angelegt: {{ backup_dir }}/apt-sources"
-        success_msg: "Backup-Zielverzeichnis ist vorhanden."
-      when: not ansible_check_mode
+    - name: Header für Liste der neuen Konfigurationsdateien anlegen
+      copy:
+        dest: "{{ new_files_log }}"
+        content: |
+          === Neue Konfigurationsdateien ===
+          Datum: {{ lookup('pipe', 'date') }}
+          ==================================
+      when: inventory_hostname == '81.169.250.132'
 
-    - name: Pruefen, ob /etc/apt/sources.list existiert
-      ansible.builtin.stat:
-        path: /etc/apt/sources.list
-      register: apt_sources_list
+    # ------------------------------------------------------------
+    # Paketquellen und Upgrades
+    # ------------------------------------------------------------
+    - name: Paketquellen aktualisieren (apt update)
+      apt:
+        update_cache: yes
+      register: update_result
 
-    - name: /etc/apt/sources.list sichern
-      ansible.builtin.copy:
-        src: /etc/apt/sources.list
-        dest: "{{ backup_dir }}/apt-sources/sources.list"
-        remote_src: true
-        owner: root
-        group: root
-        mode: "0640"
-      when:
-        - not ansible_check_mode
-        - apt_sources_list.stat.exists
+    - name: Führe APT Upgrade durch (aktualisiere installierte Pakete)
+      apt:
+        upgrade: dist
+        autoremove: yes
+        autoclean: yes
+      register: upgrade_result
 
-    - name: Pruefen, ob /etc/apt/sources.list.d existiert
-      ansible.builtin.stat:
-        path: /etc/apt/sources.list.d
-      register: apt_sources_list_d_dir
-
-    - name: APT-Quellen unter /etc/apt/sources.list.d suchen
-      ansible.builtin.find:
-        paths: /etc/apt/sources.list.d
-        patterns:
-          - "*.list"
-          - "*.sources"
-        file_type: file
-      register: apt_sources_list_d
-      when: apt_sources_list_d_dir.stat.exists
-
-    - name: APT-Quellen aus sources.list.d sichern
-      ansible.builtin.copy:
-        src: "{{ item.path }}"
-        dest: "{{ backup_dir }}/apt-sources/sources.list.d/{{ item.path | basename }}"
-        remote_src: true
-        owner: root
-        group: root
-        mode: "0640"
-      loop: "{{ apt_sources_list_d.files | default([]) }}"
-      when: not ansible_check_mode
-
-    - name: Installierte Pakete vor dem Upgrade protokollieren
-      ansible.builtin.command:
-        cmd: dpkg -l
-      register: dpkg_before
+    # ------------------------------------------------------------
+    # Kernel-Update und Reboot-Check
+    # ------------------------------------------------------------
+    - name: Prüfe, ob Kernel-Update verfügbar ist
+      shell: |
+        apt list --upgradable 2>/dev/null | grep -E 'linux-image|linux-headers' || true
+      register: kernel_check
       changed_when: false
 
-    - name: Manuell installierte Pakete vor dem Upgrade protokollieren
-      ansible.builtin.command:
-        cmd: apt-mark showmanual
-      register: apt_manual_before
-      changed_when: false
-
-    - name: Paketquellen aktualisieren
-      ansible.builtin.apt:
-        update_cache: true
-        update_cache_retries: 5
-        update_cache_retry_max_delay: 12
-        lock_timeout: "{{ apt_lock_timeout }}"
-      register: apt_update_result
-      when: not ansible_check_mode
-
-    - name: Aktualisierbare Pakete vor dem Upgrade protokollieren
-      ansible.builtin.command:
-        cmd: apt list --upgradable
-      register: apt_upgradable_before
-      changed_when: false
-
-    - name: Vorab-Protokolle speichern
-      ansible.builtin.copy:
-        dest: "{{ backup_dir }}/pre-upgrade-report.txt"
-        owner: root
-        group: root
-        mode: "0640"
-        content: |
-          Host: {{ inventory_hostname }}
-          Datum: {{ ansible_date_time.iso8601 }}
-          Upgrade-Modus: {{ apt_upgrade_mode }}
-          Autoremove aktiv: {{ apt_do_autoremove }}
-          Automatischer Reboot aktiv: {{ apt_do_reboot }}
-
-          === APT Update Ergebnis ===
-          cache_updated: {{ apt_update_result.cache_updated | default('unbekannt') }}
-          cache_update_time: {{ apt_update_result.cache_update_time | default('unbekannt') }}
-
-          === Aktualisierbare Pakete vor dem Upgrade ===
-          {{ apt_upgradable_before.stdout }}
-
-          === Manuell installierte Pakete vor dem Upgrade ===
-          {{ apt_manual_before.stdout }}
-
-          === dpkg -l vor dem Upgrade ===
-          {{ dpkg_before.stdout }}
-      when: not ansible_check_mode
-
-    - name: APT Upgrade defensiv ausfuehren
-      ansible.builtin.apt:
-        upgrade: "{{ apt_upgrade_mode }}"
-        force_apt_get: true
-        fail_on_autoremove: true
-        dpkg_options: "force-confdef,force-confold"
-        lock_timeout: "{{ apt_lock_timeout }}"
-      register: apt_upgrade_result
-
-    - name: APT Upgrade Ergebnis speichern
-      ansible.builtin.copy:
-        dest: "{{ backup_dir }}/upgrade-result.txt"
-        owner: root
-        group: root
-        mode: "0640"
-        content: |
-          Host: {{ inventory_hostname }}
-          Datum: {{ ansible_date_time.iso8601 }}
-          Upgrade-Modus: {{ apt_upgrade_mode }}
-          Changed: {{ apt_upgrade_result.changed | default('unbekannt') }}
-
-          === STDOUT ===
-          {{ apt_upgrade_result.stdout | default('') }}
-
-          === STDERR ===
-          {{ apt_upgrade_result.stderr | default('') }}
-      when: not ansible_check_mode
-
-    - name: Optional ungenutzte Pakete entfernen
-      ansible.builtin.apt:
-        autoremove: true
-        purge: false
-        lock_timeout: "{{ apt_lock_timeout }}"
-      register: apt_autoremove_result
-      when:
-        - not ansible_check_mode
-        - apt_do_autoremove | bool
-
-    - name: Optionales Autoremove Ergebnis speichern
-      ansible.builtin.copy:
-        dest: "{{ backup_dir }}/autoremove-result.txt"
-        owner: root
-        group: root
-        mode: "0640"
-        content: |
-          Host: {{ inventory_hostname }}
-          Datum: {{ ansible_date_time.iso8601 }}
-          Autoremove wurde bewusst aktiviert.
-
-          === STDOUT ===
-          {{ apt_autoremove_result.stdout | default('') }}
-
-          === STDERR ===
-          {{ apt_autoremove_result.stderr | default('') }}
-      when:
-        - not ansible_check_mode
-        - apt_do_autoremove | bool
-
-    - name: Neue oder geaenderte dpkg-Konfigurationsdateien suchen
-      ansible.builtin.find:
-        paths: /etc
-        patterns:
-          - "*.dpkg-dist"
-          - "*.dpkg-old"
-          - "*.dpkg-new"
-        file_type: file
-        recurse: true
-      register: dpkg_config_files
-
-    - name: Zielverzeichnisse fuer dpkg-Konfigurationsdateien anlegen
-      ansible.builtin.file:
-        path: "{{ backup_dir }}/changed-configs{{ item.path | dirname }}"
-        state: directory
-        owner: root
-        group: root
-        mode: "0750"
-      loop: "{{ dpkg_config_files.files }}"
-      when: not ansible_check_mode
-
-    - name: dpkg-Konfigurationsdateien sichern
-      ansible.builtin.copy:
-        src: "{{ item.path }}"
-        dest: "{{ backup_dir }}/changed-configs{{ item.path }}"
-        remote_src: true
-        owner: root
-        group: root
-        mode: "0640"
-      loop: "{{ dpkg_config_files.files }}"
-      when: not ansible_check_mode
-
-    - name: Unterschiede zu vorhandenen Original-Konfigurationen protokollieren
-      ansible.builtin.shell: |
-        original={{ (item.path | regex_replace('\\.dpkg-(dist|old|new)$', '')) | quote }}
-        candidate={{ item.path | quote }}
-
-        echo "### $candidate"
-        if [ -f "$original" ]; then
-          diff -u "$original" "$candidate" || true
-        else
-          echo "Originaldatei nicht gefunden: $original"
-        fi
-      args:
-        executable: /bin/bash
-      register: dpkg_config_diffs
-      changed_when: false
-      loop: "{{ dpkg_config_files.files }}"
-      when: not ansible_check_mode
-
-    - name: Diff-Protokoll fuer dpkg-Konfigurationsdateien speichern
-      ansible.builtin.copy:
-        dest: "{{ backup_dir }}/changed-configs-diff.txt"
-        owner: root
-        group: root
-        mode: "0640"
-        content: |
-          Host: {{ inventory_hostname }}
-          Datum: {{ ansible_date_time.iso8601 }}
-
-          {% if dpkg_config_diffs.results is defined and dpkg_config_diffs.results | length > 0 %}
-          {% for result in dpkg_config_diffs.results %}
-          {{ result.stdout | default('') }}
-          {{ result.stderr | default('') }}
-
-          {% endfor %}
-          {% else %}
-          Keine dpkg-Konfigurationsdateien gefunden.
-          {% endif %}
-      when: not ansible_check_mode
-
-    - name: Pruefen, ob ein Neustart erforderlich ist
-      ansible.builtin.stat:
+    - name: Prüfe, ob Reboot notwendig ist
+      stat:
         path: /var/run/reboot-required
-      register: reboot_required_file
+      register: reboot_check
 
-    - name: Pakete mit Neustartbedarf auslesen
-      ansible.builtin.command:
-        cmd: cat /var/run/reboot-required.pkgs
-      register: reboot_required_packages
-      changed_when: false
-      failed_when: false
-      when: reboot_required_file.stat.exists
+    - name: Setze Statusfakten für Kernel/Reboot
+      set_fact:
+        kernel_update_available: "{{ kernel_check.stdout != '' }}"
+        reboot_required: "{{ reboot_check.stat.exists | default(false) }}"
 
-    - name: Abschlussbericht speichern
-      ansible.builtin.copy:
-        dest: "{{ backup_dir }}/summary.txt"
-        owner: root
-        group: root
-        mode: "0640"
-        content: |
-          Host: {{ inventory_hostname }}
-          Datum: {{ ansible_date_time.iso8601 }}
-          Backup-Verzeichnis: {{ backup_dir }}
-          Upgrade-Modus: {{ apt_upgrade_mode }}
+    # ------------------------------------------------------------
+    # Neue oder geänderte Konfigurationsdateien sichern
+    # ------------------------------------------------------------
+    - name: Suche nach neuen oder geänderten Konfigurationsdateien
+      find:
+        paths: /etc
+        patterns: "*.dpkg-dist"
+      register: new_config_files
 
-          Paketquellen aktualisiert: ja
-          Upgrade ausgefuehrt: ja
-          Autoremove ausgefuehrt: {{ apt_do_autoremove | bool }}
-          Automatischer Reboot erlaubt: {{ apt_do_reboot | bool }}
-          Reboot erforderlich: {{ reboot_required_file.stat.exists | default(false) }}
+    - name: Neue Dateien sichern
+      copy:
+        src: "{{ item.path }}"
+        dest: "{{ backup_dir }}/"
+        remote_src: true
+      loop: "{{ new_config_files.files }}"
+      when: new_config_files.matched > 0
 
-          {% if reboot_required_file.stat.exists %}
-          Pakete mit Neustartbedarf:
-          {{ reboot_required_packages.stdout | default('Keine Paketliste vorhanden.') }}
-          {% endif %}
-      when: not ansible_check_mode
+    - name: Prüfe, ob Originaldateien existieren
+      stat:
+        path: "{{ item.path | regex_replace('.dpkg-dist$', '') }}"
+      loop: "{{ new_config_files.files }}"
+      register: original_files
+      when: new_config_files.matched > 0
 
-    - name: Optional neu starten, wenn ausdruecklich erlaubt und erforderlich
-      ansible.builtin.reboot:
-        msg: "Reboot nach APT Upgrade durch Ansible"
-        reboot_timeout: 1800
+    - name: Originaldateien sichern (falls vorhanden)
+      copy:
+        src: "{{ item.stat.path }}"
+        dest: "{{ backup_dir }}/"
+        remote_src: true
+      loop: "{{ original_files.results }}"
       when:
-        - not ansible_check_mode
-        - apt_do_reboot | bool
-        - reboot_required_file.stat.exists | default(false)
+        - item.stat.exists is defined
+        - item.stat.exists
 
+    - name: Stelle sicher, dass Backup-Verzeichnis existiert (Failsafe)
+      file:
+        path: "{{ backup_dir }}"
+        state: directory
+        mode: '0755'
+
+    # ------------------------------------------------------------
+    # Zusammenfassung
+    # ------------------------------------------------------------
     - name: Zusammenfassung anzeigen
-      ansible.builtin.debug:
+      debug:
         msg:
-          - "APT-Lauf abgeschlossen fuer {{ inventory_hostname }}."
-          - "Backup und Protokolle: {{ backup_dir }}"
-          - "Autoremove ausgefuehrt: {{ apt_do_autoremove | bool }}"
-          - "Reboot erforderlich: {{ reboot_required_file.stat.exists | default(false) }}"
-          - "Automatischer Reboot erlaubt: {{ apt_do_reboot | bool }}"
+          - "✅ Paketquellen aktualisiert"
+          - "✅ Installierte Pakete aktualisiert"
+          - "✅ Alte Pakete entfernt und System bereinigt"
+          - "✅ Backups und Logs gespeichert unter: {{ backup_dir }}"
+          - "{{ '♻️  Neustart erforderlich' if reboot_required else 'ℹ️  Kein Neustart nötig' }}"
+          - "{{ '🧩 Kernel-Update verfügbar' if kernel_update_available else '✅ Kernel aktuell' }}"
+          - "🚀 APT-Update & Upgrade abgeschlossen"
