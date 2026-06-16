@@ -37,6 +37,7 @@
         owner: root
         group: root
         mode: "0750"
+      when: not ansible_check_mode
 
     - name: Backup-Verzeichnis fuer diesen Lauf anlegen
       ansible.builtin.file:
@@ -45,6 +46,7 @@
         owner: root
         group: root
         mode: "0750"
+      when: not ansible_check_mode
 
     - name: Unterverzeichnis fuer APT-Quellen anlegen
       ansible.builtin.file:
@@ -56,6 +58,22 @@
       loop:
         - "{{ backup_dir }}/apt-sources"
         - "{{ backup_dir }}/apt-sources/sources.list.d"
+      when: not ansible_check_mode
+
+    - name: Backup-Zielverzeichnis pruefen
+      ansible.builtin.stat:
+        path: "{{ backup_dir }}/apt-sources"
+      register: apt_sources_backup_dir
+      when: not ansible_check_mode
+
+    - name: Sicherstellen, dass Backup-Zielverzeichnis existiert
+      ansible.builtin.assert:
+        that:
+          - apt_sources_backup_dir.stat.exists
+          - apt_sources_backup_dir.stat.isdir
+        fail_msg: "Backup-Zielverzeichnis wurde nicht angelegt: {{ backup_dir }}/apt-sources"
+        success_msg: "Backup-Zielverzeichnis ist vorhanden."
+      when: not ansible_check_mode
 
     - name: Pruefen, ob /etc/apt/sources.list existiert
       ansible.builtin.stat:
@@ -70,7 +88,9 @@
         owner: root
         group: root
         mode: "0640"
-      when: apt_sources_list.stat.exists
+      when:
+        - not ansible_check_mode
+        - apt_sources_list.stat.exists
 
     - name: Pruefen, ob /etc/apt/sources.list.d existiert
       ansible.builtin.stat:
@@ -96,6 +116,7 @@
         group: root
         mode: "0640"
       loop: "{{ apt_sources_list_d.files | default([]) }}"
+      when: not ansible_check_mode
 
     - name: Installierte Pakete vor dem Upgrade protokollieren
       ansible.builtin.command:
@@ -116,6 +137,7 @@
         update_cache_retry_max_delay: 12
         lock_timeout: "{{ apt_lock_timeout }}"
       register: apt_update_result
+      when: not ansible_check_mode
 
     - name: Aktualisierbare Pakete vor dem Upgrade protokollieren
       ansible.builtin.command:
@@ -148,6 +170,7 @@
 
           === dpkg -l vor dem Upgrade ===
           {{ dpkg_before.stdout }}
+      when: not ansible_check_mode
 
     - name: APT Upgrade defensiv ausfuehren
       ansible.builtin.apt:
@@ -175,6 +198,7 @@
 
           === STDERR ===
           {{ apt_upgrade_result.stderr | default('') }}
+      when: not ansible_check_mode
 
     - name: Optional ungenutzte Pakete entfernen
       ansible.builtin.apt:
@@ -182,7 +206,9 @@
         purge: false
         lock_timeout: "{{ apt_lock_timeout }}"
       register: apt_autoremove_result
-      when: apt_do_autoremove | bool
+      when:
+        - not ansible_check_mode
+        - apt_do_autoremove | bool
 
     - name: Optionales Autoremove Ergebnis speichern
       ansible.builtin.copy:
@@ -200,7 +226,9 @@
 
           === STDERR ===
           {{ apt_autoremove_result.stderr | default('') }}
-      when: apt_do_autoremove | bool
+      when:
+        - not ansible_check_mode
+        - apt_do_autoremove | bool
 
     - name: Neue oder geaenderte dpkg-Konfigurationsdateien suchen
       ansible.builtin.find:
@@ -221,6 +249,7 @@
         group: root
         mode: "0750"
       loop: "{{ dpkg_config_files.files }}"
+      when: not ansible_check_mode
 
     - name: dpkg-Konfigurationsdateien sichern
       ansible.builtin.copy:
@@ -231,6 +260,7 @@
         group: root
         mode: "0640"
       loop: "{{ dpkg_config_files.files }}"
+      when: not ansible_check_mode
 
     - name: Unterschiede zu vorhandenen Original-Konfigurationen protokollieren
       ansible.builtin.shell: |
@@ -248,6 +278,7 @@
       register: dpkg_config_diffs
       changed_when: false
       loop: "{{ dpkg_config_files.files }}"
+      when: not ansible_check_mode
 
     - name: Diff-Protokoll fuer dpkg-Konfigurationsdateien speichern
       ansible.builtin.copy:
@@ -268,6 +299,7 @@
           {% else %}
           Keine dpkg-Konfigurationsdateien gefunden.
           {% endif %}
+      when: not ansible_check_mode
 
     - name: Pruefen, ob ein Neustart erforderlich ist
       ansible.builtin.stat:
@@ -304,12 +336,14 @@
           Pakete mit Neustartbedarf:
           {{ reboot_required_packages.stdout | default('Keine Paketliste vorhanden.') }}
           {% endif %}
+      when: not ansible_check_mode
 
     - name: Optional neu starten, wenn ausdruecklich erlaubt und erforderlich
       ansible.builtin.reboot:
         msg: "Reboot nach APT Upgrade durch Ansible"
         reboot_timeout: 1800
       when:
+        - not ansible_check_mode
         - apt_do_reboot | bool
         - reboot_required_file.stat.exists | default(false)
 
