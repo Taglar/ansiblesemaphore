@@ -8,27 +8,29 @@
 
   vars:
     backup_root: "/var/backups"
+    apt_lock_timeout: 300
+    apt_cache_valid_time: 3600
 
   pre_tasks:
     # ------------------------------------------------------------
-    # Einmaligen globalen Zeitstempel erzeugen (nur einmal, lokal)
+    # Einmaligen globalen Zeitstempel erzeugen
     # ------------------------------------------------------------
     - name: Generiere globalen Zeitstempel
       run_once: true
       delegate_to: localhost
       vars:
         ts_command: "date +%Y-%m-%d_%H%M%S"
-      set_fact:
+      ansible.builtin.set_fact:
         generated_backup_date: "{{ lookup('pipe', ts_command) }}"
 
     - name: Globalen Zeitstempel an alle Hosts weitergeben
       run_once: true
-      add_host:
+      ansible.builtin.add_host:
         name: "global_vars_holder"
         backup_date: "{{ generated_backup_date }}"
 
     - name: Hole globalen Zeitstempel aus global_vars_holder
-      set_fact:
+      ansible.builtin.set_fact:
         backup_date: "{{ hostvars['global_vars_holder'].backup_date }}"
         backup_dir: "{{ backup_root }}/apt_config_{{ hostvars['global_vars_holder'].backup_date }}"
         diff_log: "{{ backup_root }}/apt_config_{{ hostvars['global_vars_holder'].backup_date }}/apt_diff.log"
@@ -36,140 +38,451 @@
 
   tasks:
 
-    # ------------------------------------------------------------
-    # Prüfen und ggf. Rechte für /var/backups anpassen
-    # ------------------------------------------------------------
-    - name: Prüfe Schreibrechte auf /var/backups
-      stat:
-        path: /var/backups
-      register: backups_stat
+    # ============================================================
+    # Backup-Verzeichnisse
+    # ============================================================
 
-    - name: Rechte für /var/backups anpassen (falls nötig)
-      file:
-        path: /var/backups
+    - name: Stelle korrektes /var/backups Verzeichnis sicher
+      ansible.builtin.file:
+        path: "{{ backup_root }}"
+        state: directory
         owner: root
         group: root
         mode: '0755'
-      when: backups_stat.stat.exists and backups_stat.stat.mode|int != 493
-      become: true
 
-    # ------------------------------------------------------------
-    # Backup- und Log-Verzeichnisse anlegen
-    # ------------------------------------------------------------
-    - name: Verzeichnisse für Backups/Logs anlegen
-      file:
-        path: "{{ item }}"
+    - name: Backup-Verzeichnis für diesen Lauf anlegen
+      ansible.builtin.file:
+        path: "{{ backup_dir }}"
         state: directory
+        owner: root
+        group: root
         mode: '0755'
-      loop:
-        - "{{ backup_dir }}"
-        - "/var/log"
 
-    # ------------------------------------------------------------
-    # Header-Dateien anlegen (nur auf bestimmtem Host)
-    # ------------------------------------------------------------
-    - name: Header für Diff-Log anlegen
-      copy:
-        dest: "{{ diff_log }}"
-        content: |
-          === APT Konfigurationsänderungen ===
-          Datum: {{ lookup('pipe', 'date') }}
-          ====================================
-      when: inventory_hostname == '81.169.250.132'
 
-    - name: Header für Liste der neuen Konfigurationsdateien anlegen
-      copy:
-        dest: "{{ new_files_log }}"
-        content: |
-          === Neue Konfigurationsdateien ===
-          Datum: {{ lookup('pipe', 'date') }}
-          ==================================
-      when: inventory_hostname == '81.169.250.132'
+    # ============================================================
+    # APT Paketquellen aktualisieren
+    #
+    # lock_timeout:
+    #   Wartet bis zu 300 Sekunden auf einen belegten APT/dpkg-Lock.
+    #
+    # cache_valid_time:
+    #   apt update wird nur ausgeführt, wenn der Cache älter
+    #   als 3600 Sekunden ist.
+    #
+    # retries:
+    #   Falls APT trotz lock_timeout fehlschlägt, erfolgt
+    #   ein weiterer Versuch.
+    # ============================================================
 
-    # ------------------------------------------------------------
-    # Paketquellen und Upgrades
-    # ------------------------------------------------------------
-    - name: Paketquellen aktualisieren (apt update)
-      apt:
-        update_cache: yes
+    - name: Paketquellen aktualisieren
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: "{{ apt_cache_valid_time }}"
+        lock_timeout: "{{ apt_lock_timeout }}"
       register: update_result
+      retries: 2
+      delay: 15
+      until: update_result is succeeded
 
-    - name: Führe APT Upgrade durch (aktualisiere installierte Pakete)
-      apt:
+
+    # ============================================================
+    # Kernelstand VOR dem Upgrade erfassen
+    # ============================================================
+
+    - name: Ermittle neuesten installierten Kernel vor dem Upgrade
+      ansible.builtin.shell: |
+        set -o pipefail
+        ls -1 /boot/vmlinuz-* 2>/dev/null \
+          | sort -V \
+          | tail -n 1 \
+          | sed 's#.*/vmlinuz-##' || true
+      args:
+        executable: /bin/bash
+      register: kernel_before
+      changed_when: false
+      failed_when: false
+
+
+    # ============================================================
+    # APT Upgrade
+    # ============================================================
+
+    - name: Installierte Pakete aktualisieren
+      ansible.builtin.apt:
         upgrade: dist
-        autoremove: yes
-        autoclean: yes
+        lock_timeout: "{{ apt_lock_timeout }}"
       register: upgrade_result
+      retries: 2
+      delay: 15
+      until: upgrade_result is succeeded
 
-    # ------------------------------------------------------------
-    # Kernel-Update und Reboot-Check
-    # ------------------------------------------------------------
-    - name: Prüfe, ob Kernel-Update verfügbar ist
-      shell: |
-        apt list --upgradable 2>/dev/null | grep -E 'linux-image|linux-headers' || true
-      register: kernel_check
+
+    # ============================================================
+    # APT Bereinigung getrennt vom Upgrade
+    # ============================================================
+
+    - name: Nicht mehr benötigte Pakete entfernen und Cache bereinigen
+      ansible.builtin.apt:
+        autoremove: true
+        autoclean: true
+        lock_timeout: "{{ apt_lock_timeout }}"
+      register: cleanup_result
+      retries: 2
+      delay: 15
+      until: cleanup_result is succeeded
+
+
+    # ============================================================
+    # Kernelstand NACH dem Upgrade erfassen
+    # ============================================================
+
+    - name: Ermittle neuesten installierten Kernel nach dem Upgrade
+      ansible.builtin.shell: |
+        set -o pipefail
+        ls -1 /boot/vmlinuz-* 2>/dev/null \
+          | sort -V \
+          | tail -n 1 \
+          | sed 's#.*/vmlinuz-##' || true
+      args:
+        executable: /bin/bash
+      register: kernel_after
+      changed_when: false
+      failed_when: false
+
+    - name: Ermittle aktuell laufenden Kernel
+      ansible.builtin.command:
+        cmd: uname -r
+      register: running_kernel
       changed_when: false
 
-    - name: Prüfe, ob Reboot notwendig ist
-      stat:
+
+    # ============================================================
+    # Reboot-Check
+    # ============================================================
+
+    - name: Prüfe ob Neustart erforderlich ist
+      ansible.builtin.stat:
         path: /var/run/reboot-required
       register: reboot_check
 
-    - name: Setze Statusfakten für Kernel/Reboot
-      set_fact:
-        kernel_update_available: "{{ kernel_check.stdout != '' }}"
-        reboot_required: "{{ reboot_check.stat.exists | default(false) }}"
+    - name: Setze Kernel- und Reboot-Status
+      ansible.builtin.set_fact:
+        kernel_updated_during_run: >-
+          {{
+            kernel_before.stdout | trim != kernel_after.stdout | trim
+            and kernel_after.stdout | trim != ''
+          }}
 
-    # ------------------------------------------------------------
-    # Neue oder geänderte Konfigurationsdateien sichern
-    # ------------------------------------------------------------
+        running_kernel_outdated: >-
+          {{
+            kernel_after.stdout | trim != ''
+            and running_kernel.stdout | trim != kernel_after.stdout | trim
+          }}
+
+        reboot_required: >-
+          {{
+            reboot_check.stat.exists | default(false)
+          }}
+
+
+    # ============================================================
+    # Neue/geänderte Paket-Konfigurationsdateien suchen
+    #
+    # dpkg-dist = neue Konfiguration des Paketbetreuers
+    # dpkg-old  = vorherige Konfiguration
+    # dpkg-new  = temporäre/neue Konfiguration
+    # ucf-dist  = neue Konfiguration bei UCF
+    # ucf-old   = vorherige UCF-Konfiguration
+    # ============================================================
+
     - name: Suche nach neuen oder geänderten Konfigurationsdateien
-      find:
+      ansible.builtin.find:
         paths: /etc
-        patterns: "*.dpkg-dist"
+        recurse: true
+        file_type: file
+        patterns:
+          - "*.dpkg-dist"
+          - "*.dpkg-old"
+          - "*.dpkg-new"
+          - "*.ucf-dist"
+          - "*.ucf-old"
       register: new_config_files
 
-    - name: Neue Dateien sichern
-      copy:
-        src: "{{ item.path }}"
-        dest: "{{ backup_dir }}/"
-        remote_src: true
-      loop: "{{ new_config_files.files }}"
-      when: new_config_files.matched > 0
 
-    - name: Prüfe, ob Originaldateien existieren
-      stat:
-        path: "{{ item.path | regex_replace('.dpkg-dist$', '') }}"
-      loop: "{{ new_config_files.files }}"
-      register: original_files
-      when: new_config_files.matched > 0
+    # ============================================================
+    # Log der gefundenen Konfigurationsdateien schreiben
+    # ============================================================
 
-    - name: Originaldateien sichern (falls vorhanden)
-      copy:
-        src: "{{ item.stat.path }}"
-        dest: "{{ backup_dir }}/"
-        remote_src: true
-      loop: "{{ original_files.results }}"
-      when:
-        - item.stat.exists is defined
-        - item.stat.exists
+    - name: Schreibe Liste der gefundenen Konfigurationsdateien
+      ansible.builtin.copy:
+        dest: "{{ new_files_log }}"
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          === Neue / geänderte Paket-Konfigurationsdateien ===
+          Host: {{ inventory_hostname }}
+          Systemname: {{ ansible_hostname }}
+          Datum: {{ ansible_date_time.iso8601 }}
+          Anzahl: {{ new_config_files.matched }}
+          ====================================================
 
-    - name: Stelle sicher, dass Backup-Verzeichnis existiert (Failsafe)
-      file:
-        path: "{{ backup_dir }}"
+          {% if new_config_files.matched | int > 0 %}
+          {% for config_file in new_config_files.files %}
+          {{ config_file.path }}
+          {% endfor %}
+          {% else %}
+          Keine neuen oder geänderten Paket-Konfigurationsdateien gefunden.
+          {% endif %}
+
+
+    # ============================================================
+    # Verzeichnisstruktur der gefundenen Dateien im Backup
+    # erhalten
+    #
+    # Beispiel:
+    #
+    # /etc/nginx/nginx.conf.dpkg-dist
+    #
+    # wird zu:
+    #
+    # /var/backups/apt_config_DATE/
+    #   artifacts/etc/nginx/nginx.conf.dpkg-dist
+    # ============================================================
+
+    - name: Erzeuge Verzeichnisstruktur für Paket-Konfigurationsdateien
+      ansible.builtin.file:
+        path: "{{ backup_dir }}/artifacts{{ item.path | dirname }}"
         state: directory
+        owner: root
+        group: root
         mode: '0755'
+      loop: "{{ new_config_files.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+      when: new_config_files.matched | int > 0
 
-    # ------------------------------------------------------------
+    - name: Sichere neue oder geänderte Paket-Konfigurationsdateien
+      ansible.builtin.copy:
+        src: "{{ item.path }}"
+        dest: "{{ backup_dir }}/artifacts{{ item.path }}"
+        remote_src: true
+        mode: preserve
+      loop: "{{ new_config_files.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+      when: new_config_files.matched | int > 0
+
+
+    # ============================================================
+    # Prüfen, ob zu den Paketdateien Originaldateien existieren
+    # ============================================================
+
+    - name: Prüfe ob Originaldateien existieren
+      ansible.builtin.stat:
+        path: "{{ original_path }}"
+      vars:
+        original_path: >-
+          {{
+            item.path
+            | regex_replace(
+                '\.(dpkg-dist|dpkg-old|dpkg-new|ucf-dist|ucf-old)$',
+                ''
+              )
+          }}
+      loop: "{{ new_config_files.files }}"
+      loop_control:
+        label: "{{ item.path }}"
+      register: original_files
+      when: new_config_files.matched | int > 0
+
+
+    # ============================================================
+    # Originaldateien mit kompletter Pfadstruktur sichern
+    #
+    # Beispiel:
+    #
+    # /etc/nginx/nginx.conf
+    #
+    # wird zu:
+    #
+    # /var/backups/apt_config_DATE/
+    #   originals/etc/nginx/nginx.conf
+    # ============================================================
+
+    - name: Erzeuge Verzeichnisstruktur für Originaldateien
+      ansible.builtin.file:
+        path: "{{ backup_dir }}/originals{{ original_path | dirname }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+      vars:
+        original_path: >-
+          {{
+            item.item.path
+            | regex_replace(
+                '\.(dpkg-dist|dpkg-old|dpkg-new|ucf-dist|ucf-old)$',
+                ''
+              )
+          }}
+      loop: "{{ original_files.results | default([]) }}"
+      loop_control:
+        label: "{{ original_path }}"
+      when:
+        - item.stat is defined
+        - item.stat.exists | default(false)
+
+    - name: Sichere vorhandene Originaldateien
+      ansible.builtin.copy:
+        src: "{{ original_path }}"
+        dest: "{{ backup_dir }}/originals{{ original_path }}"
+        remote_src: true
+        mode: preserve
+      vars:
+        original_path: >-
+          {{
+            item.item.path
+            | regex_replace(
+                '\.(dpkg-dist|dpkg-old|dpkg-new|ucf-dist|ucf-old)$',
+                ''
+              )
+          }}
+      loop: "{{ original_files.results | default([]) }}"
+      loop_control:
+        label: "{{ original_path }}"
+      when:
+        - item.stat is defined
+        - item.stat.exists | default(false)
+
+
+    # ============================================================
+    # Diff-Log initialisieren
+    # ============================================================
+
+    - name: Initialisiere Diff-Log
+      ansible.builtin.copy:
+        dest: "{{ diff_log }}"
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          === APT Konfigurationsänderungen ===
+          Host: {{ inventory_hostname }}
+          Systemname: {{ ansible_hostname }}
+          Datum: {{ ansible_date_time.iso8601 }}
+          ====================================
+
+
+    # ============================================================
+    # Diffs zwischen Original und Paketdatei erzeugen
+    #
+    # diff gibt Exitcode 1 zurück, wenn Unterschiede vorhanden
+    # sind. Das ist kein Fehler und wird deshalb abgefangen.
+    # ============================================================
+
+    - name: Erzeuge Diff für gefundene Konfigurationsdateien
+      ansible.builtin.shell: |
+        {
+          echo
+          echo "============================================================"
+          echo "Datei: {{ item.item.path }}"
+          echo "Original: {{ original_path }}"
+          echo "============================================================"
+
+          if [ -f {{ original_path | quote }} ]; then
+              diff -u \
+                --label {{ original_path | quote }} \
+                --label {{ item.item.path | quote }} \
+                {{ original_path | quote }} \
+                {{ item.item.path | quote }} || true
+          else
+              echo "Originaldatei nicht vorhanden."
+          fi
+        } >> {{ diff_log | quote }}
+      args:
+        executable: /bin/bash
+      vars:
+        original_path: >-
+          {{
+            item.item.path
+            | regex_replace(
+                '\.(dpkg-dist|dpkg-old|dpkg-new|ucf-dist|ucf-old)$',
+                ''
+              )
+          }}
+      loop: "{{ original_files.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.path }}"
+      changed_when: false
+      when:
+        - item.item is defined
+
+
+    # ============================================================
     # Zusammenfassung
-    # ------------------------------------------------------------
+    # ============================================================
+
     - name: Zusammenfassung anzeigen
-      debug:
+      ansible.builtin.debug:
         msg:
-          - "✅ Paketquellen aktualisiert"
-          - "✅ Installierte Pakete aktualisiert"
-          - "✅ Alte Pakete entfernt und System bereinigt"
-          - "✅ Backups und Logs gespeichert unter: {{ backup_dir }}"
-          - "{{ '♻️  Neustart erforderlich' if reboot_required else 'ℹ️  Kein Neustart nötig' }}"
-          - "{{ '🧩 Kernel-Update verfügbar' if kernel_update_available else '✅ Kernel aktuell' }}"
-          - "🚀 APT-Update & Upgrade abgeschlossen"
+          - "============================================================"
+          - "APT UPDATE / UPGRADE ABGESCHLOSSEN"
+          - "============================================================"
+
+          - >-
+            {{
+              '🔄 APT-Paketcache wurde aktualisiert'
+              if update_result.changed
+              else
+              '✅ APT-Paketcache war noch aktuell'
+            }}
+
+          - >-
+            {{
+              '📦 Pakete wurden aktualisiert'
+              if upgrade_result.changed
+              else
+              '✅ Keine Paketupdates erforderlich'
+            }}
+
+          - >-
+            {{
+              '🧹 Nicht mehr benötigte Pakete wurden entfernt / Cache bereinigt'
+              if cleanup_result.changed
+              else
+              '✅ Keine APT-Bereinigung erforderlich'
+            }}
+
+          - "📁 Backup-Verzeichnis: {{ backup_dir }}"
+          - "📄 Konfigurationsdateien gefunden: {{ new_config_files.matched }}"
+          - "📝 Dateiliste: {{ new_files_log }}"
+          - "🔍 Diff-Log: {{ diff_log }}"
+
+          - >-
+            {{
+              '🧩 Während dieses Laufs wurde ein neuer Kernel installiert'
+              if kernel_updated_during_run
+              else
+              '✅ Während dieses Laufs wurde kein neuer Kernel installiert'
+            }}
+
+          - >-
+            {{
+              '⚠️ Laufender Kernel ' ~ running_kernel.stdout ~
+              ' entspricht nicht dem neuesten installierten Kernel ' ~
+              kernel_after.stdout
+              if running_kernel_outdated
+              else
+              '✅ Laufender Kernel ist aktuell'
+            }}
+
+          - >-
+            {{
+              '♻️ Neustart erforderlich'
+              if reboot_required
+              else
+              '✅ Kein Neustart erforderlich'
+            }}
+
+          - "🚀 APT Update & Upgrade auf {{ inventory_hostname }} abgeschlossen"
