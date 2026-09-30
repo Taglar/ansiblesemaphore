@@ -8,13 +8,23 @@
 
   vars:
     backup_root: "/var/backups"
-    apt_lock_timeout: 300
+
+    # Maximale Wartezeit auf einen belegten APT/dpkg-Lock.
+    # Bei dauerhaft blockiertem APT soll nicht 5 Minuten pro Versuch
+    # gewartet werden.
+    apt_lock_timeout: 60
+
+    # apt update wird nur ausgeführt, wenn der Paketcache älter
+    # als eine Stunde ist.
     apt_cache_valid_time: 3600
 
+
   pre_tasks:
-    # ------------------------------------------------------------
+
+    # ============================================================
     # Einmaligen globalen Zeitstempel erzeugen
-    # ------------------------------------------------------------
+    # ============================================================
+
     - name: Generiere globalen Zeitstempel
       run_once: true
       delegate_to: localhost
@@ -35,6 +45,7 @@
         backup_dir: "{{ backup_root }}/apt_config_{{ hostvars['global_vars_holder'].backup_date }}"
         diff_log: "{{ backup_root }}/apt_config_{{ hostvars['global_vars_holder'].backup_date }}/apt_diff.log"
         new_files_log: "{{ backup_root }}/apt_config_{{ hostvars['global_vars_holder'].backup_date }}/new_config_files.log"
+
 
   tasks:
 
@@ -60,29 +71,265 @@
 
 
     # ============================================================
-    # APT Paketquellen aktualisieren
+    # APT / DPKG VORAB-DIAGNOSE
     #
-    # lock_timeout:
-    #   Wartet bis zu 300 Sekunden auf einen belegten APT/dpkg-Lock.
-    #
-    # cache_valid_time:
-    #   apt update wird nur ausgeführt, wenn der Cache älter
-    #   als 3600 Sekunden ist.
-    #
-    # retries:
-    #   Falls APT trotz lock_timeout fehlschlägt, erfolgt
-    #   ein weiterer Versuch.
+    # Zeigt vor dem eigentlichen apt update:
+    # - vorhandene Lock-Dateien
+    # - Prozesse, die Locks halten
+    # - laufende apt/dpkg/unattended Prozesse
+    # - Status der systemd APT-Dienste
+    # - Status der APT-Timer
     # ============================================================
 
-    - name: Paketquellen aktualisieren
-      ansible.builtin.apt:
-        update_cache: true
-        cache_valid_time: "{{ apt_cache_valid_time }}"
-        lock_timeout: "{{ apt_lock_timeout }}"
-      register: update_result
-      retries: 2
-      delay: 15
-      until: update_result is succeeded
+    - name: Prüfe APT-Locks und laufende Paketprozesse
+      ansible.builtin.shell: |
+        echo "===== APT / DPKG LOCKS ====="
+
+        for lock in \
+          /var/lib/dpkg/lock \
+          /var/lib/dpkg/lock-frontend \
+          /var/lib/apt/lists/lock \
+          /var/cache/apt/archives/lock
+        do
+          echo
+          echo "--- $lock ---"
+
+          if [ -e "$lock" ]; then
+            fuser -v "$lock" 2>&1 || echo "Kein Prozess hält diesen Lock."
+          else
+            echo "Lock-Datei existiert nicht."
+          fi
+        done
+
+        echo
+        echo "===== LAUFENDE APT / DPKG PROZESSE ====="
+
+        ps -eo pid,ppid,etime,state,wchan:30,cmd \
+          | grep -E '[a]pt|[d]pkg|[u]nattended' \
+          || echo "Keine laufenden APT/DPKG-Prozesse gefunden."
+
+        echo
+        echo "===== SYSTEMD APT SERVICES ====="
+
+        systemctl --no-pager --full status \
+          apt-daily.service \
+          apt-daily-upgrade.service \
+          unattended-upgrades.service \
+          2>&1 || true
+
+        echo
+        echo "===== SYSTEMD APT TIMER ====="
+
+        systemctl --no-pager --full list-timers \
+          apt-daily.timer \
+          apt-daily-upgrade.timer \
+          2>&1 || true
+
+      args:
+        executable: /bin/bash
+      register: apt_precheck
+      changed_when: false
+      failed_when: false
+
+    - name: Zeige APT Status vor Update
+      ansible.builtin.debug:
+        msg: "{{ apt_precheck.stdout_lines }}"
+
+
+    # ============================================================
+    # APT Paketquellen aktualisieren
+    #
+    # Falls apt update fehlschlägt, läuft der Rescue-Block und
+    # sammelt umfangreiche Diagnoseinformationen.
+    # ============================================================
+
+    - name: Paketquellen aktualisieren mit Fehlerdiagnose
+      block:
+
+        - name: Paketquellen aktualisieren
+          ansible.builtin.apt:
+            update_cache: true
+            cache_valid_time: "{{ apt_cache_valid_time }}"
+            lock_timeout: "{{ apt_lock_timeout }}"
+          register: update_result
+          retries: 2
+          delay: 15
+          until: update_result is succeeded
+
+
+      rescue:
+
+        # --------------------------------------------------------
+        # Ergebnis des fehlgeschlagenen Ansible-APT-Tasks
+        # --------------------------------------------------------
+
+        - name: Debug - Ansible APT Fehler
+          ansible.builtin.debug:
+            msg:
+              - "============================================================"
+              - "❌ APT UPDATE FEHLGESCHLAGEN"
+              - "============================================================"
+              - "Host: {{ inventory_hostname }}"
+              - "Message: {{ update_result.msg | default('Keine Meldung vorhanden') }}"
+              - "STDOUT: {{ update_result.stdout | default('Keine STDOUT-Ausgabe vorhanden') }}"
+              - "STDERR: {{ update_result.stderr | default('Keine STDERR-Ausgabe vorhanden') }}"
+              - "RC: {{ update_result.rc | default('nicht vorhanden') }}"
+
+
+        # --------------------------------------------------------
+        # APT-Locks NACH dem Fehler prüfen
+        # --------------------------------------------------------
+
+        - name: Debug - Prüfe APT Locks nach Fehler
+          ansible.builtin.shell: |
+            echo "===== APT / DPKG LOCKS NACH FEHLER ====="
+
+            for lock in \
+              /var/lib/dpkg/lock \
+              /var/lib/dpkg/lock-frontend \
+              /var/lib/apt/lists/lock \
+              /var/cache/apt/archives/lock
+            do
+              echo
+              echo "--- $lock ---"
+
+              if [ -e "$lock" ]; then
+                fuser -v "$lock" 2>&1 || echo "Kein Prozess hält diesen Lock."
+              else
+                echo "Lock-Datei existiert nicht."
+              fi
+            done
+
+            echo
+            echo "===== LAUFENDE APT / DPKG PROZESSE ====="
+
+            ps -eo pid,ppid,etime,state,wchan:30,cmd \
+              | grep -E '[a]pt|[d]pkg|[u]nattended' \
+              || echo "Keine laufenden APT/DPKG-Prozesse gefunden."
+
+            echo
+            echo "===== SYSTEMD APT SERVICES ====="
+
+            systemctl --no-pager --full status \
+              apt-daily.service \
+              apt-daily-upgrade.service \
+              unattended-upgrades.service \
+              2>&1 || true
+
+          args:
+            executable: /bin/bash
+          register: apt_lock_debug
+          changed_when: false
+          failed_when: false
+
+        - name: Debug - Zeige Lock Informationen
+          ansible.builtin.debug:
+            msg: "{{ apt_lock_debug.stdout_lines }}"
+
+
+        # --------------------------------------------------------
+        # Logs von unattended-upgrades und APT ausgeben
+        # --------------------------------------------------------
+
+        - name: Debug - Letzte APT und unattended-upgrades Logs
+          ansible.builtin.shell: |
+            echo "===== UNATTENDED-UPGRADES LOG ====="
+
+            if [ -f /var/log/unattended-upgrades/unattended-upgrades.log ]; then
+              tail -n 50 /var/log/unattended-upgrades/unattended-upgrades.log
+            else
+              echo "Logdatei nicht vorhanden."
+            fi
+
+            echo
+            echo "===== UNATTENDED-UPGRADES DPKG LOG ====="
+
+            if [ -f /var/log/unattended-upgrades/unattended-upgrades-dpkg.log ]; then
+              tail -n 50 /var/log/unattended-upgrades/unattended-upgrades-dpkg.log
+            else
+              echo "Logdatei nicht vorhanden."
+            fi
+
+            echo
+            echo "===== APT TERM LOG ====="
+
+            if [ -f /var/log/apt/term.log ]; then
+              tail -n 50 /var/log/apt/term.log
+            else
+              echo "Logdatei nicht vorhanden."
+            fi
+
+            echo
+            echo "===== APT HISTORY LOG ====="
+
+            if [ -f /var/log/apt/history.log ]; then
+              tail -n 50 /var/log/apt/history.log
+            else
+              echo "Logdatei nicht vorhanden."
+            fi
+
+          args:
+            executable: /bin/bash
+          register: apt_log_debug
+          changed_when: false
+          failed_when: false
+
+        - name: Debug - Zeige APT Logs
+          ansible.builtin.debug:
+            msg: "{{ apt_log_debug.stdout_lines }}"
+
+
+        # --------------------------------------------------------
+        # Diagnostisches apt-get update
+        #
+        # Maximal 60 Sekunden Gesamtlaufzeit.
+        #
+        # Kein zusätzlicher Retry durch APT.
+        # HTTP/HTTPS Timeout auf 15 Sekunden.
+        # Lock-Wartezeit nur 10 Sekunden.
+        #
+        # Dadurch werden auch DNS-, IPv4/IPv6-, Repository-
+        # oder Netzwerkprobleme sichtbar.
+        # --------------------------------------------------------
+
+        - name: Debug - Diagnostisches apt-get update
+          ansible.builtin.shell: |
+            timeout 60s \
+              apt-get \
+              -o DPkg::Lock::Timeout=10 \
+              -o Acquire::Retries=0 \
+              -o Acquire::http::Timeout=15 \
+              -o Acquire::https::Timeout=15 \
+              update 2>&1
+          args:
+            executable: /bin/bash
+          register: apt_manual_debug
+          changed_when: false
+          failed_when: false
+
+        - name: Debug - Zeige diagnostische apt-get Ausgabe
+          ansible.builtin.debug:
+            msg:
+              - "============================================================"
+              - "APT-GET UPDATE DEBUG"
+              - "============================================================"
+              - "Returncode: {{ apt_manual_debug.rc }}"
+              - "{{ apt_manual_debug.stdout_lines }}"
+
+
+        # --------------------------------------------------------
+        # Host bewusst als fehlgeschlagen markieren.
+        #
+        # Es werden ausdrücklich KEINE Lock-Dateien gelöscht.
+        # --------------------------------------------------------
+
+        - name: APT Update endgültig als fehlgeschlagen markieren
+          ansible.builtin.fail:
+            msg: >-
+              APT Update auf {{ inventory_hostname }} ist fehlgeschlagen.
+              Die Diagnoseinformationen wurden unmittelbar davor ausgegeben.
+              APT/dpkg-Lock-Dateien wurden aus Sicherheitsgründen nicht
+              automatisch entfernt.
 
 
     # ============================================================
@@ -92,6 +339,7 @@
     - name: Ermittle neuesten installierten Kernel vor dem Upgrade
       ansible.builtin.shell: |
         set -o pipefail
+
         ls -1 /boot/vmlinuz-* 2>/dev/null \
           | sort -V \
           | tail -n 1 \
@@ -139,6 +387,7 @@
     - name: Ermittle neuesten installierten Kernel nach dem Upgrade
       ansible.builtin.shell: |
         set -o pipefail
+
         ls -1 /boot/vmlinuz-* 2>/dev/null \
           | sort -V \
           | tail -n 1 \
@@ -167,16 +416,19 @@
 
     - name: Setze Kernel- und Reboot-Status
       ansible.builtin.set_fact:
+
         kernel_updated_during_run: >-
           {{
             kernel_before.stdout | trim != kernel_after.stdout | trim
-            and kernel_after.stdout | trim != ''
+            and
+            kernel_after.stdout | trim != ''
           }}
 
         running_kernel_outdated: >-
           {{
             kernel_after.stdout | trim != ''
-            and running_kernel.stdout | trim != kernel_after.stdout | trim
+            and
+            running_kernel.stdout | trim != kernel_after.stdout | trim
           }}
 
         reboot_required: >-
@@ -186,12 +438,12 @@
 
 
     # ============================================================
-    # Neue/geänderte Paket-Konfigurationsdateien suchen
+    # Neue / geänderte Paket-Konfigurationsdateien suchen
     #
-    # dpkg-dist = neue Konfiguration des Paketbetreuers
+    # dpkg-dist = neue Paketversion einer Konfiguration
     # dpkg-old  = vorherige Konfiguration
-    # dpkg-new  = temporäre/neue Konfiguration
-    # ucf-dist  = neue Konfiguration bei UCF
+    # dpkg-new  = neue / temporäre Paketkonfiguration
+    # ucf-dist  = neue UCF-Konfiguration
     # ucf-old   = vorherige UCF-Konfiguration
     # ============================================================
 
@@ -210,7 +462,7 @@
 
 
     # ============================================================
-    # Log der gefundenen Konfigurationsdateien schreiben
+    # Liste der gefundenen Dateien schreiben
     # ============================================================
 
     - name: Schreibe Liste der gefundenen Konfigurationsdateien
@@ -237,14 +489,15 @@
 
 
     # ============================================================
-    # Verzeichnisstruktur der gefundenen Dateien im Backup
-    # erhalten
+    # Paket-Konfigurationsdateien sichern
+    #
+    # Die komplette Verzeichnisstruktur wird erhalten.
     #
     # Beispiel:
     #
     # /etc/nginx/nginx.conf.dpkg-dist
     #
-    # wird zu:
+    # wird:
     #
     # /var/backups/apt_config_DATE/
     #   artifacts/etc/nginx/nginx.conf.dpkg-dist
@@ -275,7 +528,7 @@
 
 
     # ============================================================
-    # Prüfen, ob zu den Paketdateien Originaldateien existieren
+    # Zugehörige Originaldateien ermitteln
     # ============================================================
 
     - name: Prüfe ob Originaldateien existieren
@@ -298,13 +551,15 @@
 
 
     # ============================================================
-    # Originaldateien mit kompletter Pfadstruktur sichern
+    # Originaldateien sichern
+    #
+    # Auch hier bleibt die komplette Pfadstruktur erhalten.
     #
     # Beispiel:
     #
     # /etc/nginx/nginx.conf
     #
-    # wird zu:
+    # wird:
     #
     # /var/backups/apt_config_DATE/
     #   originals/etc/nginx/nginx.conf
@@ -371,14 +626,18 @@
           Host: {{ inventory_hostname }}
           Systemname: {{ ansible_hostname }}
           Datum: {{ ansible_date_time.iso8601 }}
+          Anzahl gefundener Paketdateien: {{ new_config_files.matched }}
           ====================================
 
 
     # ============================================================
     # Diffs zwischen Original und Paketdatei erzeugen
     #
-    # diff gibt Exitcode 1 zurück, wenn Unterschiede vorhanden
-    # sind. Das ist kein Fehler und wird deshalb abgefangen.
+    # diff:
+    # RC 0 = identisch
+    # RC 1 = Unterschiede
+    #
+    # RC 1 ist daher kein Fehler.
     # ============================================================
 
     - name: Erzeuge Diff für gefundene Konfigurationsdateien
@@ -386,19 +645,24 @@
         {
           echo
           echo "============================================================"
-          echo "Datei: {{ item.item.path }}"
-          echo "Original: {{ original_path }}"
+          echo "Paketdatei: {{ item.item.path }}"
+          echo "Original:   {{ original_path }}"
           echo "============================================================"
 
           if [ -f {{ original_path | quote }} ]; then
-              diff -u \
-                --label {{ original_path | quote }} \
-                --label {{ item.item.path | quote }} \
-                {{ original_path | quote }} \
-                {{ item.item.path | quote }} || true
+
+            diff -u \
+              --label {{ original_path | quote }} \
+              --label {{ item.item.path | quote }} \
+              {{ original_path | quote }} \
+              {{ item.item.path | quote }} || true
+
           else
-              echo "Originaldatei nicht vorhanden."
+
+            echo "Originaldatei nicht vorhanden."
+
           fi
+
         } >> {{ diff_log | quote }}
       args:
         executable: /bin/bash
@@ -426,6 +690,7 @@
     - name: Zusammenfassung anzeigen
       ansible.builtin.debug:
         msg:
+
           - "============================================================"
           - "APT UPDATE / UPGRADE ABGESCHLOSSEN"
           - "============================================================"
@@ -455,8 +720,11 @@
             }}
 
           - "📁 Backup-Verzeichnis: {{ backup_dir }}"
+
           - "📄 Konfigurationsdateien gefunden: {{ new_config_files.matched }}"
+
           - "📝 Dateiliste: {{ new_files_log }}"
+
           - "🔍 Diff-Log: {{ diff_log }}"
 
           - >-
